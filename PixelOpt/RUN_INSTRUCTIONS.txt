@@ -1,0 +1,29 @@
+ML-Based Adaptive Image Compression and Resizing
+
+How to run the project locally on Windows
+
+1. Open Command Prompt in the project folder.
+   Example:
+   cd /d "C:\Users\vashu\OneDrive\Desktop\PCV\New_Intern"
+
+2. Start the app using the launcher batch file:
+   launch_app.bat
+
+3. If you want to run it manually instead:
+   python -m venv .venv
+   .\.venv\Scripts\activate.bat
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+   streamlit run app.py --server.headless true --server.address 127.0.0.1 --server.port 8501
+
+4. Open the browser and go to:
+   http://127.0.0.1:8501
+
+5. Upload an image, choose the target output size in KB, and click Compress and resize image.
+
+6. Download the resized image and the final compressed image from the output section.
+
+Notes:
+- The app uses a trained model stored in the models folder if available.
+- If no trained model is found, it can build a fallback model from the uploaded image.
+- The app is intended for local execution and is not yet configured for cloud deployment.
