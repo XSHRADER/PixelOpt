@@ -1,0 +1,17 @@
+# Virtualenvs
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Training scratch output
+catboost_info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# NOTE: models/adaptive_compression_model.joblib IS committed on purpose,
+# so the Streamlit app runs without retraining first.

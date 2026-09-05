@@ -1,0 +1,43 @@
+Function execution order in the app
+
+1. app.py
+   - Starts the Streamlit interface.
+   - Creates a single AdaptiveImageCompressor object in session state.
+   - Opens the file uploader and waits for an image.
+   - Reads the target size in KB from the slider.
+   - Calls compress() when the user clicks the Compress image button.
+
+2. AdaptiveImageCompressor.compress(image_input, target_size_kb)
+   - Loads the input image.
+   - Checks whether a model is already available.
+   - If no model is available, it trains a fallback model using the current image.
+   - Calls extract_feature_vector(image, target_size_kb) to build the feature vector.
+   - Calls self.model.predict_single(feature_vector) to estimate resize factor and JPEG quality.
+   - Resizes the image using the predicted resize factor.
+   - Iterates through quality and resize candidates near the prediction to minimize file size error.
+   - Encodes JPEG output and measures final size in KB.
+   - Computes SSIM, PSNR, and MSE against the original image.
+   - Returns the compressed image and the metrics.
+
+3. src.image_features.py
+   - Contains image feature extraction and quality measurements.
+   - extract_feature_vector() builds the numerical characteristics that the model uses.
+   - compute_quality_metrics() compares original and compressed images using SSIM, PSNR, and MSE.
+
+4. src.compression_model.py
+   - Holds the model wrapper logic.
+   - Trains the regressor using image features and target resize/quality pairs.
+   - Saves and loads the trained model with joblib.
+   - predict_single() returns the resize factor and JPEG quality estimate.
+
+5. src.adaptive_compressor.py
+   - This is the main orchestration layer.
+   - It coordinates image loading, model usage, candidate search, JPEG encoding, and quality metrics.
+
+6. Result shown in app.py
+   - Original and compressed images are displayed.
+   - The resized image and final compressed output can each be downloaded.
+   - Predicted resize factor, JPEG quality, target size, actual size, and quality metrics are printed.
+
+End-to-end summary:
+User upload -> app.py -> AdaptiveImageCompressor.compress() -> feature extraction -> model prediction -> resize and quality tuning -> image encoding -> metric calculation -> UI display
