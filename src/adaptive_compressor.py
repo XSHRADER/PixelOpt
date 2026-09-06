@@ -104,9 +104,12 @@ class AdaptiveImageCompressor:
 
         fits = [t for t in tried if t[0] <= target_bytes]
         if fits:
-            # Closest to the budget from below, preferring less downscaling
-            # when two candidates land on the same size.
-            return max(fits, key=lambda t: (t[0], t[1]))
+            # Closest to the budget from below, then less downscaling, then
+            # higher quality. That last tie-break matters for flat images,
+            # where every quality level encodes to the same number of bytes --
+            # without it the search kept whichever probe it happened to try
+            # first rather than the best-looking one.
+            return max(fits, key=lambda t: (t[0], t[1], t[2]))
         # Nothing fits even at the smallest settings; return the smallest.
         return min(tried, key=lambda t: t[0])
 

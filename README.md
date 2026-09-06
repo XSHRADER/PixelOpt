@@ -1,5 +1,7 @@
 # ML-Based Adaptive Image Compression and Resizing
 
+[![tests](https://github.com/XSHRADER/PixelOpt/actions/workflows/tests.yml/badge.svg)](https://github.com/XSHRADER/PixelOpt/actions/workflows/tests.yml)
+
 This project implements an intelligent image compression workflow that predicts the best resize factor and JPEG quality for a target file size. It combines computer-vision feature extraction with a multi-output regression model to balance file-size reduction with visual quality preservation.
 
 ## Measured results
