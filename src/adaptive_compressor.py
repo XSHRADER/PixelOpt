@@ -48,6 +48,68 @@ class AdaptiveImageCompressor:
         features, targets = self._generate_synthetic_dataset(image_path, target_size_kb, count=samples)
         return self.model.train(features, targets)
 
+    RESIZE_GRID = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.22, 0.15)
+    QUALITY_MIN = 10
+    QUALITY_MAX = 95
+
+    @staticmethod
+    def _encode(image_rgb: np.ndarray, resize: float, quality: int):
+        """Resize the ORIGINAL image by `resize` and JPEG-encode it.
+
+        Always scaling from the original matters: the previous version
+        resized the already-resized image, so the model's resize factor and
+        the search factor multiplied together and the search could only ever
+        shrink further. A large target was unreachable no matter what.
+        """
+        if resize >= 0.999:
+            candidate = image_rgb
+        else:
+            height, width = image_rgb.shape[:2]
+            candidate = cv2.resize(
+                image_rgb,
+                (max(1, int(width * resize)), max(1, int(height * resize))),
+                interpolation=cv2.INTER_AREA,
+            )
+        encoded = cv2.imencode(
+            ".jpg",
+            cv2.cvtColor(candidate, cv2.COLOR_RGB2BGR),
+            [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)],
+        )[1]
+        return candidate, encoded.tobytes()
+
+    def _search(self, image_rgb: np.ndarray, target_bytes: float, seed_resize: float):
+        """Find the highest-fidelity encoding that still fits `target_bytes`.
+
+        File size is monotonic in JPEG quality, so for each resize factor the
+        best quality is found by binary search instead of a fixed +/-15 sweep
+        around the model's guess -- which is what stopped the old loop from
+        ever reaching the target when the guess was wrong.
+
+        The grid is ordered outward from the model's predicted resize factor,
+        so the prediction still steers the search; it just no longer bounds it.
+        """
+        grid = sorted(self.RESIZE_GRID, key=lambda r: abs(r - seed_resize))
+        tried = []
+
+        for resize in grid:
+            low, high = self.QUALITY_MIN, self.QUALITY_MAX
+            while low <= high:
+                mid = (low + high) // 2
+                candidate, data = self._encode(image_rgb, resize, mid)
+                tried.append((len(data), resize, mid, candidate, data))
+                if len(data) <= target_bytes:
+                    low = mid + 1     # room to spare -- try higher quality
+                else:
+                    high = mid - 1    # too big -- back off
+
+        fits = [t for t in tried if t[0] <= target_bytes]
+        if fits:
+            # Closest to the budget from below, preferring less downscaling
+            # when two candidates land on the same size.
+            return max(fits, key=lambda t: (t[0], t[1]))
+        # Nothing fits even at the smallest settings; return the smallest.
+        return min(tried, key=lambda t: t[0])
+
     def compress(self, image_input, target_size_kb: float) -> Dict[str, object]:
         image = load_image(image_input)
         if image.ndim != 3:
@@ -60,65 +122,21 @@ class AdaptiveImageCompressor:
         prediction = self.model.predict_single(feature_vector)
         resize_factor, quality = prediction
 
-        resized = cv2.resize(
-            cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
-            (
-                max(1, int(image.shape[1] * resize_factor)),
-                max(1, int(image.shape[0] * resize_factor)),
-            ),
-            interpolation=cv2.INTER_AREA,
+        target_bytes = max(target_size_kb * 1024, 1)
+        size_bytes, best_resize, best_quality, best_image, final_bytes = self._search(
+            image, target_bytes, float(resize_factor)
         )
-        resized_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
-        target = max(target_size_kb * 1024, 1)
-        adjusted_quality = int(round(quality))
-        adjusted_resize = resize_factor
-        best_result = None
-        best_error = float("inf")
-
-        for q in range(max(10, adjusted_quality - 15), min(95, adjusted_quality + 15) + 1, 2):
-            for r in np.linspace(max(0.2, adjusted_resize - 0.2), min(1.0, adjusted_resize + 0.2), 8):
-                candidate = cv2.resize(
-                    resized_rgb,
-                    (
-                        max(1, int(resized_rgb.shape[1] * r)),
-                        max(1, int(resized_rgb.shape[0] * r)),
-                    ),
-                    interpolation=cv2.INTER_AREA,
-                )
-                encoded = cv2.imencode(".jpg", cv2.cvtColor(candidate, cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY), int(q)])[1]
-                size_bytes = len(encoded.tobytes())
-                error = abs(size_bytes - target)
-                if error < best_error:
-                    best_error = error
-                    best_result = {
-                        "resize_factor": float(r),
-                        "quality": int(q),
-                        "size_bytes": size_bytes,
-                        "image": candidate,
-                    }
-
-        if best_result is None:
-            best_result = {
-                "resize_factor": float(resize_factor),
-                "quality": int(adjusted_quality),
-                "size_bytes": 0,
-                "image": resized_rgb,
-            }
-
-        compressed_rgb = best_result["image"]
-        resized_image = Image.fromarray(np.asarray(compressed_rgb).astype(np.uint8))
-        encoded = cv2.imencode(".jpg", cv2.cvtColor(compressed_rgb, cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY), int(best_result["quality"])])[1]
-        final_bytes = encoded.tobytes()
+        resized_image = Image.fromarray(np.asarray(best_image).astype(np.uint8))
         compressed_image = Image.open(io.BytesIO(final_bytes)).convert("RGB")
         metrics = compute_quality_metrics(image, np.asarray(compressed_image))
 
         return {
             "original_shape": image.shape,
-            "resized_shape": resized_image.size[::-1] if hasattr(resized_image, "size") else compressed_rgb.shape[:2][::-1],
-            "compressed_shape": compressed_rgb.shape,
-            "resize_factor": float(best_result["resize_factor"]),
-            "quality": int(best_result["quality"]),
+            "resized_shape": best_image.shape[:2][::-1],
+            "compressed_shape": best_image.shape,
+            "resize_factor": float(best_resize),
+            "quality": int(best_quality),
             "target_size_kb": float(target_size_kb),
             "actual_size_kb": len(final_bytes) / 1024.0,
             "ssim": metrics["ssim"],
