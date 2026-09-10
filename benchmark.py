@@ -15,12 +15,18 @@ glyphs, dense high-frequency detail, near-flat colour). Size-targeting error
 transfers to real photos; the absolute SSIM/PSNR figures are only meaningful
 relative to each other, and the README says so.
 
+The default targets deliberately span the resolution crossover: at 1200x1200
+a 25 KB budget is 0.14 bits per pixel, where downscaling first wins, while
+500 KB is 2.8 bpp, where full resolution always wins. Testing only the high
+end hides half the behaviour.
+
 Usage:
     python benchmark.py
     python benchmark.py --targets 100 200 500
 """
 
 import argparse
+import io
 import statistics
 import time
 
@@ -85,8 +91,8 @@ IMAGES = {
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark the adaptive compressor.")
     parser.add_argument(
-        "--targets", type=float, nargs="+", default=[100, 200, 500],
-        help="Target sizes in KB (default: 100 200 500)",
+        "--targets", type=float, nargs="+", default=[25, 50, 100, 200, 500],
+        help="Target sizes in KB (default: 25 50 100 200 500)",
     )
     args = parser.parse_args()
 
@@ -95,7 +101,7 @@ def main() -> int:
 
     header = (
         f"{'image':<13}{'target':>8}{'actual':>9}{'error':>9}"
-        f"{'SSIM':>8}{'PSNR':>8}{'ratio':>8}{'time':>8}"
+        f"{'SSIM':>8}{'PSNR':>8}{'vs PNG':>8}{'enc':>5}{'time':>7}"
     )
     print(f"\n{SIZE}x{SIZE} test images, {len(args.targets)} target sizes\n")
     print(header)
@@ -103,7 +109,11 @@ def main() -> int:
 
     for name, make in IMAGES.items():
         array = make()
-        original_kb = array.size / 1024.0  # raw RGB bytes
+        # Compare against a lossless PNG, not raw RGB. Nobody stores raw RGB,
+        # so measuring against it inflates every ratio several-fold.
+        lossless = io.BytesIO()
+        Image.fromarray(array).save(lossless, format="PNG", optimize=True)
+        original_kb = lossless.tell() / 1024.0
         for target in args.targets:
             started = time.monotonic()
             result = compressor.compress(Image.fromarray(array), target)
@@ -124,12 +134,14 @@ def main() -> int:
             rows.append(
                 {
                     "image": name, "target": target, "actual": actual,
-                    "error": error, "ssim": ssim, "psnr": psnr, "ratio": ratio, "capped": capped,
+                    "error": error, "ssim": ssim, "psnr": psnr, "ratio": ratio,
+                    "capped": capped, "encodes": int(result["encodes"]),
                 }
             )
             print(
                 f"{name:<13}{target:>7.0f}K{actual:>8.1f}K{error:>8.1f}%"
-                f"{ssim:>8.3f}{psnr:>8.1f}{ratio:>7.0f}x{elapsed:>7.2f}s" + ('  (at max quality)' if capped else '')
+                f"{ssim:>8.3f}{psnr:>8.1f}{ratio:>7.1f}x{result['encodes']:>5}"
+                f"{elapsed:>6.2f}s" + ("  (at max quality)" if capped else "")
             )
 
     print("-" * len(header))
@@ -152,6 +164,16 @@ def main() -> int:
     print(
         f"SSIM: median {statistics.median(r['ssim'] for r in rows):.3f}  "
         f"min {min(r['ssim'] for r in rows):.3f}"
+    )
+    print(
+        f"encoder calls per run: median {statistics.median(r['encodes'] for r in rows):.0f}  "
+        f"mean {statistics.mean(r['encodes'] for r in rows):.1f}  "
+        f"max {max(r['encodes'] for r in rows)}"
+    )
+    lossy_wins = [r for r in rows if r["ratio"] > 1.0]
+    print(
+        f"smaller than a lossless PNG of the same image: {len(lossy_wins)}/{len(rows)} "
+        "(ratios above are against PNG, not raw RGB)"
     )
     return 0
 
