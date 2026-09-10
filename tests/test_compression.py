@@ -1,5 +1,7 @@
 import io
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -9,6 +11,7 @@ from pixelopt.adaptive_compressor import (
     RESIZE_GRID,
     AdaptiveImageCompressor,
 )
+from pixelopt.cli import main as cli_main
 from pixelopt.image_features import compute_quality_metrics, image_stats, load_image
 
 SIZE = 400
@@ -194,6 +197,67 @@ class OrientationTests(unittest.TestCase):
 
 
 
+
+
+class CommandLineTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.root = Path(self.folder.name)
+        self.source = self.root / "sample.png"
+        Image.fromarray(detailed_image()).save(self.source)
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def test_compresses_to_a_named_output(self):
+        out = self.root / "out.jpg"
+        code = cli_main([str(self.source), "--target", "30", "-o", str(out), "-q"])
+        self.assertEqual(code, 0)
+        self.assertTrue(out.exists())
+        self.assertLessEqual(out.stat().st_size, 30 * 1024)
+
+    def test_batch_writes_into_a_directory(self):
+        second = self.root / "second.png"
+        Image.fromarray(flat_image()).save(second)
+        outdir = self.root / "web"
+        code = cli_main(
+            [str(self.source), str(second), "--target", "40", "-d", str(outdir), "-q"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list(outdir.iterdir())), 2)
+
+    def test_format_flag_picks_the_extension(self):
+        outdir = self.root / "webp"
+        cli_main(
+            [str(self.source), "--target", "40", "-d", str(outdir), "-f", "webp", "-q"]
+        )
+        self.assertEqual([p.suffix for p in outdir.iterdir()], [".webp"])
+
+    def test_existing_output_is_not_clobbered(self):
+        out = self.root / "out.jpg"
+        out.write_bytes(b"keep me")
+        code = cli_main([str(self.source), "--target", "30", "-o", str(out), "-q"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out.read_bytes(), b"keep me")
+
+    def test_overwrite_flag_replaces_it(self):
+        out = self.root / "out.jpg"
+        out.write_bytes(b"replace me")
+        code = cli_main(
+            [str(self.source), "--target", "30", "-o", str(out), "--overwrite", "-q"]
+        )
+        self.assertEqual(code, 0)
+        self.assertNotEqual(out.read_bytes(), b"replace me")
+
+    def test_missing_file_is_an_error(self):
+        with self.assertRaises(SystemExit):
+            cli_main([str(self.root / "nope.png"), "--target", "30"])
+
+    def test_out_with_many_inputs_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            cli_main(
+                [str(self.source), str(self.source), "--target", "30", "-o", "x.jpg"]
+            )
 
 
 if __name__ == "__main__":
