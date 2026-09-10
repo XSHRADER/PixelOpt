@@ -12,7 +12,12 @@ from pixelopt.adaptive_compressor import (
     AdaptiveImageCompressor,
 )
 from pixelopt.cli import main as cli_main
-from pixelopt.image_features import compute_quality_metrics, image_stats, load_image
+from pixelopt.image_features import (
+    compute_quality_metrics,
+    has_transparency,
+    image_stats,
+    load_image,
+)
 
 SIZE = 400
 RNG = np.random.default_rng(7)
@@ -197,6 +202,32 @@ class OrientationTests(unittest.TestCase):
 
 
 
+
+
+class TransparencyTests(unittest.TestCase):
+    @staticmethod
+    def transparent_png() -> Image.Image:
+        # Fully transparent pixels sitting on top of black.
+        picture = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        picture.paste((200, 30, 30, 255), (16, 16, 48, 48))
+        return picture
+
+    def test_transparency_is_detected(self):
+        self.assertTrue(has_transparency(self.transparent_png()))
+        self.assertFalse(has_transparency(Image.fromarray(flat_image())))
+
+    def test_transparent_areas_become_white_not_black(self):
+        # .convert("RGB") would keep the black underneath the alpha. The app
+        # promises white, so the loader has to actually composite.
+        loaded = load_image(self.transparent_png())
+        self.assertEqual(loaded.shape, (64, 64, 3))
+        corner = loaded[0, 0]
+        self.assertTrue((corner == 255).all(), f"corner was {corner}, expected white")
+        self.assertLess(int(loaded[32, 32][1]), 100)  # the red square survived
+
+    def test_transparent_image_compresses(self):
+        result = AdaptiveImageCompressor().compress(self.transparent_png(), 50)
+        self.assertLessEqual(result["actual_size_kb"], 50)
 
 
 class CommandLineTests(unittest.TestCase):
