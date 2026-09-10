@@ -27,7 +27,7 @@ import time
 import numpy as np
 from PIL import Image
 
-from src.adaptive_compressor import AdaptiveImageCompressor
+from pixelopt.adaptive_compressor import AdaptiveImageCompressor
 
 SIZE = 1200
 RNG = np.random.default_rng(20260906)  # fixed so runs are comparable
