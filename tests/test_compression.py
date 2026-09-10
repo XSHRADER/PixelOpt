@@ -201,9 +201,6 @@ class OrientationTests(unittest.TestCase):
             AdaptiveImageCompressor().compress(np.zeros((50, 50), dtype=np.uint8), 50)
 
 
-
-
-
 class TransparencyTests(unittest.TestCase):
     @staticmethod
     def transparent_png() -> Image.Image:
@@ -228,6 +225,30 @@ class TransparencyTests(unittest.TestCase):
     def test_transparent_image_compresses(self):
         result = AdaptiveImageCompressor().compress(self.transparent_png(), 50)
         self.assertLessEqual(result["actual_size_kb"], 50)
+
+
+class QualitySearchTests(unittest.TestCase):
+    def test_quality_search_finds_the_boundary(self):
+        # The encode just above the chosen quality must not fit, otherwise the
+        # interpolation stopped early and gave away quality it could have had.
+        image = detailed_image()
+        target = 40 * 1024
+        result = AdaptiveImageCompressor(formats=["JPEG"]).compress(image, 40)
+        quality = int(result["quality"])
+        if quality < 95:
+            _, bigger = AdaptiveImageCompressor._encode(
+                image, result["resize_factor"], quality + 1, "JPEG"
+            )
+            self.assertGreater(
+                len(bigger), target, "a higher quality also fit; search stopped short"
+            )
+
+    def test_webp_beats_jpeg_at_the_same_budget(self):
+        # The reason WebP was added. If this ever fails, revisit the default.
+        image = Image.fromarray(detailed_image())
+        jpeg = AdaptiveImageCompressor().compress(image, 40, image_format="JPEG")
+        webp = AdaptiveImageCompressor().compress(image, 40, image_format="WEBP")
+        self.assertGreater(webp["ssim"], jpeg["ssim"])
 
 
 class CommandLineTests(unittest.TestCase):
