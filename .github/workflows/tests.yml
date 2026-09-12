@@ -30,7 +30,9 @@ jobs:
           pip install -e .
 
       - name: Run tests
-        run: python tests/test_compression.py -v
+        run: |
+          python tests/test_compression.py -v
+          python tests/test_enhance.py -v
 
       # The CLI is the entry point most likely to break silently: nothing else
       # exercises the console script, the batch loop or the overwrite guard.
@@ -39,6 +41,8 @@ jobs:
           python tests/make_ci_image.py ci.png
           pixelopt ci.png --target 40 -o ci_out.jpg
           python tests/assert_under.py ci_out.jpg 40
+          pixelopt ci.png --target 40 -e auto -o ci_enh.jpg
+          python tests/assert_under.py ci_enh.jpg 40
 
       - name: Benchmark
         run: python benchmark.py --targets 25 100 300

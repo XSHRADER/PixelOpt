@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import cv2
@@ -25,10 +26,19 @@ def flatten_transparency(picture: Image.Image) -> Image.Image:
 
 
 def has_transparency(picture: Image.Image) -> bool:
-    """Whether an image carries alpha the opaque output cannot preserve."""
-    return picture.mode in ("RGBA", "LA") or (
-        picture.mode == "P" and "transparency" in picture.info
-    )
+    """Whether an image actually uses alpha the opaque output cannot preserve.
+
+    Having an alpha *channel* is not the same as using it. Plenty of PNGs are
+    saved RGBA with every pixel fully opaque -- anything that went through a
+    canvas, for one -- and warning about those is a false alarm, so check the
+    channel contents rather than just the mode.
+    """
+    if picture.mode == "P":
+        return "transparency" in picture.info
+    if picture.mode not in ("RGBA", "LA"):
+        return False
+    minimum, _ = picture.getchannel("A").getextrema()
+    return minimum < 255
 
 
 def load_image(image_source) -> np.ndarray:
@@ -38,7 +48,13 @@ def load_image(image_source) -> np.ndarray:
     so a portrait phone photo is stored landscape. Without exif_transpose the
     whole pipeline -- and the downloaded file -- comes out sideways.
     """
-    if isinstance(image_source, (str, Path)):
+    if isinstance(image_source, (bytes, bytearray, memoryview)):
+        image_source = io.BytesIO(bytes(image_source))
+
+    # A path, or any file-like object. Web uploads and in-memory buffers arrive
+    # as the latter, which is the common case for the app and was the one
+    # originally missing here.
+    if isinstance(image_source, (str, Path)) or hasattr(image_source, "read"):
         with Image.open(image_source) as handle:
             return np.array(flatten_transparency(ImageOps.exif_transpose(handle)))
 
@@ -48,7 +64,9 @@ def load_image(image_source) -> np.ndarray:
     if isinstance(image_source, np.ndarray):
         return image_source.astype(np.uint8)
 
-    raise TypeError("Unsupported image input type")
+    raise TypeError(
+        "Unsupported image input type: " + type(image_source).__name__
+    )
 
 
 def image_stats(image: np.ndarray) -> dict:
@@ -99,8 +117,23 @@ def compute_quality_metrics(original: np.ndarray, compressed: np.ndarray) -> dic
     original_gray = cv2.cvtColor(original, cv2.COLOR_RGB2GRAY)
     compressed_gray = cv2.cvtColor(compressed, cv2.COLOR_RGB2GRAY)
 
+    mse = float(mean_squared_error(original_gray, compressed_gray))
+    # A lossless encode reproduces the reference exactly, so the error is zero
+    # and PSNR is genuinely infinite. Now that PNG is a candidate the search
+    # can pick, that is a normal outcome rather than a curiosity -- compute it
+    # directly instead of letting skimage divide by zero and warn every time.
+    psnr = (
+        float("inf")
+        if mse <= 0
+        else float(
+            peak_signal_noise_ratio(original_gray, compressed_gray, data_range=255)
+        )
+    )
+
     return {
-        "ssim": float(structural_similarity(original_gray, compressed_gray, data_range=255)),
-        "psnr": float(peak_signal_noise_ratio(original_gray, compressed_gray, data_range=255)),
-        "mse": float(mean_squared_error(original_gray, compressed_gray)),
+        "ssim": float(
+            structural_similarity(original_gray, compressed_gray, data_range=255)
+        ),
+        "psnr": psnr,
+        "mse": mse,
     }

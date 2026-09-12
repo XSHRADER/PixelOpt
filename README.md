@@ -1,10 +1,56 @@
-# Search-Based Adaptive Image Compression and Resizing
+# PixelOpt — search-based image enhancement and compression
 
 [![tests](https://github.com/XSHRADER/PixelOpt/actions/workflows/tests.yml/badge.svg)](https://github.com/XSHRADER/PixelOpt/actions/workflows/tests.yml)
 
-Fit an image into a byte budget at the highest measured quality. The compressor
-chooses an output resolution, an encoder (JPEG or WebP) and a quality setting,
-then verifies its choice with SSIM rather than assuming it.
+Fit an image into a byte budget at the highest measured quality. PixelOpt
+chooses an output resolution, an encoder (JPEG, WebP or lossless PNG) and a
+quality setting, optionally cleans the image up first, and verifies every
+choice with SSIM rather than assuming it.
+
+## Enhancement, and why it belongs before the encoder
+
+**Denoising pays for itself.** Noise is incompressible high-frequency data —
+the most expensive thing an encoder can be asked to store. Measured against a
+clean ground truth that neither pipeline ever saw, denoising before compression
+improved SSIM in **9 of 9 tested conditions**:
+
+| noise (sigma) | 40 KB budget | 80 KB | 160 KB |
+|---|---|---|---|
+| 8 | +6.2% | +20.5% | +32.2% |
+| 16 | +30.9% | +80.1% | +132.3% |
+| 28 | +110.8% | +282.4% | +383.5% |
+
+The effect gets *stronger* at larger budgets, which is backwards until you see
+why: a generous budget lets the encoder faithfully reproduce the noise, while a
+tight one discards it as a side effect. Compression was accidentally denoising
+at low bitrates, and doing it deliberately is strictly better. End to end on a
+noisy photo at 80 KB, fidelity went **0.692 → 0.983**.
+
+**Auto mode measures rather than guesses.** Immerkaer noise estimation picks
+the filter strength, and does nothing at all below a threshold. It deliberately
+never touches contrast, white balance or saturation — those change how a
+photograph is meant to look, which is the photographer's call, not the tool's.
+
+Sharpening is the counterpart: it *adds* high-frequency detail the encoder then
+has to store. Worth it after a downscale, which softens edges, but not free.
+
+### The metric had to split first
+
+The old design measured quality as SSIM against the image the compressor was
+handed. Enhancement deliberately changes that image, so sharing one reference
+would have made the metric punish the enhancement and the search fight it.
+
+```
+original ──enhance──> reference ──compress──> output
+             │                        │
+             │                        └── fidelity: SSIM(reference, output)
+             │                            what the ENCODER lost
+             └── drift: SSIM(original, reference)
+                 what the ENHANCEMENT changed
+```
+
+Drift is not an error — a large drift on a noisy photo is the denoiser doing
+its job — but it is also what overprocessing looks like, so both are reported.
 
 ## How it decides
 
@@ -97,10 +143,17 @@ and matplotlib are all gone, along with a 3 MB committed model file.
 
 ## Features
 
+- Denoises, sharpens, white-balances, levels and adjusts contrast before
+  encoding, with an auto mode driven by a noise measurement.
+- Reports fidelity and drift separately, so enhancement and compression are
+  never conflated.
 - Picks output resolution from the bits-per-pixel budget in closed form.
 - Solves encoder quality by interpolation on log file size.
-- Encodes JPEG (progressive and optimized) and WebP, keeping whichever scores
-  higher at the same budget.
+- Encodes JPEG (progressive and optimized), WebP and lossless PNG, keeping
+  whichever scores highest at the same budget. On glyph-like art PNG returns
+  2.8 KB at SSIM 1.0 where the lossy path produced 23.5 KB.
+- Plots quality against budget and marks the knee, so a size can be chosen
+  from evidence instead of guessed.
 - Ranks candidates by measured SSIM instead of file size.
 - Honours EXIF orientation, so portrait photos are not returned sideways.
 - Composites transparency onto white instead of silently dropping the alpha.
@@ -111,9 +164,12 @@ and matplotlib are all gone, along with a 3 MB committed model file.
 ## Project layout
 
 - `pixelopt/adaptive_compressor.py` — the search and the encoding pipeline.
+- `pixelopt/enhance.py` — enhancement operations and noise measurement.
+- `pixelopt/pipeline.py` — enhance-then-compress, and the two-reference split.
 - `pixelopt/image_features.py` — loading, content statistics, quality metrics.
 - `pixelopt/cli.py` — command-line entry point.
 - `app.py` — Streamlit web interface.
+- `ui_components.py` — the zoomable before/after comparison (Components v2).
 - `benchmark.py` — reproducible measurements behind the table above.
 - `tests/test_compression.py` — unit tests.
 
@@ -127,7 +183,13 @@ pip install -e .
 
 pixelopt photo.jpg --target 200
 pixelopt *.jpg --target 150 --out-dir web/ --format webp
+pixelopt scan.png --target 300 --enhance scan
+pixelopt noisy.jpg --target 80 --enhance auto
 ```
+
+Enhancement presets are `none`, `photo`, `scan`, `screenshot`, `vivid`, plus
+`auto`. Individual flags (`--denoise`, `--sharpen`, `--contrast`,
+`--saturation`, `--white-balance`, `--auto-level`) layer on top of a preset.
 
 Without installing, `python -m pixelopt` works the same way from a clone.
 
@@ -168,9 +230,14 @@ not abort the batch.
 3. Open the browser at `http://127.0.0.1:8501`.
 
 4. Upload an image, choose the target output size in KB, and pick a format
-   (or leave it on Auto).
+   and enhancement preset (or leave both on Auto).
 
-5. Click **Compress and resize image**, then download either output.
+5. Compare the result against the reference with the divider, **zooming to 1:1
+   or past it** — at fit-to-screen a 200 KB and a 500 KB encode of the same
+   photo look identical, so a comparison that cannot zoom proves nothing.
+
+6. Optionally measure the budget curve to see where the knee is, then
+   download.
 
 There is no training step and no model file — the app runs straight from a
 clone.
@@ -206,6 +273,10 @@ Resized and compressed outputs shown and downloadable
 ## Future extensions
 
 - AVIF and JPEG XL support.
-- Chroma-aware quality metrics — SSIM is currently computed on luma only.
+- Chroma-aware quality metrics — SSIM is currently computed on luma only, so
+  chroma artefacts are invisible to the ranking.
 - Per-image tuning of the 0.55 bpp constant, which is a corpus-wide average.
-- Fall back to lossless PNG when it beats the lossy encoders at the budget.
+- Responsive image sets with a generated `srcset` snippet.
+- Face- and saliency-aware budget allocation.
+- A faster denoiser for very large images: non-local means costs ~0.85s at
+  0.8 MP and scales with pixel count.

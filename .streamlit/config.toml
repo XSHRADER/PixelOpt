@@ -1,0 +1,23 @@
+# Native theming rather than injected CSS: it applies consistently to every
+# element and survives Streamlit upgrades, whereas CSS selectors target
+# internal class names that change between versions.
+
+[theme]
+primaryColor = "#4f7cff"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6fb"
+textColor = "#1d2433"
+linkColor = "#3b5bdb"
+borderColor = "#e1e5ee"
+showWidgetBorder = true
+baseRadius = "0.6rem"
+buttonRadius = "0.5rem"
+font = "Inter, -apple-system, Segoe UI, Roboto, sans-serif"
+headingFont = "Inter, -apple-system, Segoe UI, Roboto, sans-serif"
+codeFont = "JetBrains Mono, SFMono-Regular, Consolas, monospace"
+
+[theme.sidebar]
+backgroundColor = "#f8fafc"
+
+[server]
+maxUploadSize = 60

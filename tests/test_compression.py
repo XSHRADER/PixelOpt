@@ -45,6 +45,17 @@ class QualityMetricTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["ssim"], 1.0, places=5)
         self.assertAlmostEqual(metrics["mse"], 0.0, places=5)
 
+    def test_zero_error_gives_infinite_psnr_without_warning(self):
+        # Lossless output is a normal result now that PNG is a candidate, so
+        # perfect reproduction must not divide by zero on the way out.
+        import warnings
+
+        image = detailed_image()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            metrics = compute_quality_metrics(image, image)
+        self.assertEqual(metrics["psnr"], float("inf"))
+
     def test_degraded_image_scores_worse(self):
         image = detailed_image()
         noisy = np.clip(image.astype(np.int16) + 45, 0, 255).astype(np.uint8)
@@ -63,6 +74,20 @@ class FeatureTests(unittest.TestCase):
         array = detailed_image()
         self.assertEqual(load_image(Image.fromarray(array)).shape, array.shape)
         self.assertEqual(load_image(array).shape, array.shape)
+
+    def test_load_image_accepts_file_like_and_bytes(self):
+        # A web upload arrives as a file-like object and a cached payload as
+        # raw bytes. Neither was handled, which broke the app on first upload.
+        array = detailed_image()
+        buffer = io.BytesIO()
+        Image.fromarray(array).save(buffer, format="PNG")
+        self.assertEqual(load_image(io.BytesIO(buffer.getvalue())).shape, array.shape)
+        self.assertEqual(load_image(buffer.getvalue()).shape, array.shape)
+
+    def test_load_image_rejects_nonsense_with_a_useful_message(self):
+        with self.assertRaises(TypeError) as caught:
+            load_image(object())
+        self.assertIn("object", str(caught.exception))
 
 
 class CompressionTests(unittest.TestCase):
@@ -231,6 +256,13 @@ class TransparencyTests(unittest.TestCase):
     def test_transparency_is_detected(self):
         self.assertTrue(has_transparency(self.transparent_png()))
         self.assertFalse(has_transparency(Image.fromarray(flat_image())))
+
+    def test_opaque_alpha_channel_is_not_transparency(self):
+        # An RGBA image with every pixel opaque carries no transparency.
+        # Warning about it is a false alarm the app used to show on any PNG
+        # that had been through a canvas.
+        opaque = Image.fromarray(flat_image()).convert("RGBA")
+        self.assertFalse(has_transparency(opaque))
 
     def test_transparent_areas_become_white_not_black(self):
         # .convert("RGB") would keep the black underneath the alpha. The app

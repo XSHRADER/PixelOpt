@@ -75,16 +75,47 @@ tolerance band, prefer resolution, then fewer bytes.
 proxy; the returned `ssim`/`psnr`/`mse` are measured once, at full resolution,
 on the winner. Do not conflate them.
 
+## The enhancement stage, and the reference split
+
+Enhancement runs before the encoder, and it forced a change to how quality is
+measured. The compressor scores SSIM against the image it was handed;
+enhancement deliberately changes that image. Sharing one reference would make
+the metric punish the enhancement and the search fight it, so `pipeline.py`
+splits it: **fidelity** is `SSIM(reference, output)` and **drift** is
+`SSIM(original, reference)`.
+
+This is the single most important thing to understand before extending the
+tool. Any new operation that alters pixels belongs before the compressor and
+is accounted for in drift, not fidelity.
+
+Two operations change how many bits the image needs, which is why they are
+here rather than in a post-processing step:
+
+- **Denoising reduces them.** Noise is incompressible. Measured against a
+  clean ground truth neither pipeline saw, denoise-then-compress won 9 of 9
+  conditions, from +6% to +383% SSIM. Auto mode sizes the filter from an
+  Immerkaer noise estimate, which reads about 0.66x true sigma -- the 0.83
+  factor in `auto_enhancements` divides that out.
+- **Sharpening increases them.** An unsharp mask adds high-frequency detail
+  the encoder must then store.
+
+Auto mode never touches contrast, white balance or saturation. Those change
+how a photograph is meant to look, and that is not the tool's call.
+
 ## Module map
 
 | file | responsibility |
 |---|---|
 | `pixelopt/adaptive_compressor.py` | the search, the encoders, the public `compress()` |
+| `pixelopt/enhance.py` | enhancement operations, noise estimation, presets |
+| `pixelopt/pipeline.py` | enhance-then-compress, the reference split, the R-D curve |
 | `pixelopt/image_features.py` | loading (EXIF, transparency), content stats, quality metrics |
 | `pixelopt/cli.py` | command-line entry point, batch handling |
 | `app.py` | Streamlit interface |
+| `ui_components.py` | the zoomable before/after comparison (Components v2) |
 | `benchmark.py` | the measurements the README publishes |
-| `tests/test_compression.py` | unit tests |
+| `tests/test_compression.py` | compressor and loader tests |
+| `tests/test_enhance.py` | enhancement, pipeline and curve tests |
 
 ## Call order
 
@@ -130,6 +161,31 @@ gradient asked for 100 KB, 200 KB and 500 KB returned the same 28 KB file.
 the reported quality, producing a different file from the one that was measured.
 The exact measured byte string is now what leaves the process.
 
+## Notes on the Streamlit app
+
+Three things there are load-bearing and easy to undo by accident:
+
+- **The comparison component must be able to zoom.** At fit-to-screen a 200 KB
+  and a 500 KB encode of the same photo are indistinguishable; the artefacts
+  are at the pixel level. The component keeps one shared transform across both
+  image layers, with the divider as a clip on an *untransformed* wrapper, so
+  the two views cannot drift out of alignment. Its "after" layer is the real
+  encoded bytes, so what is inspected at 4:1 is what gets downloaded.
+- **The budget curve is gated behind a button.** Streamlit computes the
+  contents of hidden tabs, so without the guard eight extra compressions ran
+  on every rerun even while another tab was on screen. `st.stop()` is not an
+  option inside a tab -- it halts the whole script and takes the later tabs
+  with it.
+- **The curve's budget ladder comes from the achievable ceiling**, not from
+  the slider. Spacing it off the slider put most of the ladder above what a
+  well-compressing image can produce, leaving nothing to plot. The ceiling
+  probe excludes lossless, because a PNG ceiling is not representative of a
+  lossy rate-distortion curve.
+
+Theming is in `.streamlit/config.toml` rather than injected CSS, so it applies
+to every element and survives upgrades. The only hand-written CSS lives inside
+the comparison component, where it belongs.
+
 ## Known limitations
 
 - `BPP_TARGET = 0.55` is one constant for all content. A flat image and a noisy
@@ -139,7 +195,13 @@ The exact measured byte string is now what leaves the process.
 - The resize grid is fixed and coarse below 0.3.
 - WebP is capped at 16383 px per side; larger images silently fall back to JPEG.
 - Animated images, ICC colour profiles and EXIF metadata other than orientation
-  are not preserved.
+  are not preserved. Metadata stripping is therefore implicit -- going through
+  a NumPy array drops EXIF, including GPS -- which is good for privacy but is
+  a side effect rather than a stated feature.
+- Non-local means denoising costs ~0.85s at 0.8 MP and scales with pixel
+  count, so a 12 MP image is slow. A faster path is needed there.
+- The noise estimator underestimates by roughly a third; the auto-strength
+  factor compensates, but a recalibration would be cleaner than a constant.
 
 ## Running things
 
@@ -148,6 +210,7 @@ python -m pip install -r requirements.txt
 
 set PYTHONPATH=.                    # or export, on POSIX
 python tests/test_compression.py -v
+python tests/test_enhance.py -v
 python benchmark.py
 streamlit run app.py
 ```

@@ -17,7 +17,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-app = ["streamlit>=1.33.0,<2.0.0"]
+app = [
+    "streamlit>=1.57.0,<2.0.0",
+    "altair>=5.0.0,<7.0.0",
+    "pandas>=2.0.0,<4.0.0",
+]
 
 [project.scripts]
 pixelopt = "pixelopt.cli:main"
