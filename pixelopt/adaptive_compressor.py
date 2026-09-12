@@ -36,10 +36,16 @@ SCORE_TOLERANCE = 0.002
 # WebP cannot encode a side longer than this.
 WEBP_MAX_SIDE = 16383
 
-SUPPORTED_FORMATS: Tuple[str, ...] = ("JPEG", "WEBP")
+SUPPORTED_FORMATS: Tuple[str, ...] = ("JPEG", "WEBP", "PNG")
 
-_EXTENSION = {"JPEG": "jpg", "WEBP": "webp"}
-_MIME = {"JPEG": "image/jpeg", "WEBP": "image/webp"}
+# PNG is lossless, so it has no quality knob to search -- it either fits the
+# budget or it does not. It is worth trying because the benchmark showed a
+# lossless encoder simply winning on flat and glyph-like art: 9 of 20 runs
+# produced a lossy file no smaller than the PNG of the same image.
+LOSSLESS_FORMATS: Tuple[str, ...] = ("PNG",)
+
+_EXTENSION = {"JPEG": "jpg", "WEBP": "webp", "PNG": "png"}
+_MIME = {"JPEG": "image/jpeg", "WEBP": "image/webp", "PNG": "image/png"}
 
 
 @dataclass
@@ -115,7 +121,10 @@ class AdaptiveImageCompressor:
         candidate = AdaptiveImageCompressor._resize(image_rgb, resize)
         buffer = io.BytesIO()
         picture = Image.fromarray(candidate.astype(np.uint8))
-        if fmt == "WEBP":
+        if fmt == "PNG":
+            # Lossless: the quality argument is meaningless, so ignore it.
+            picture.save(buffer, format="PNG", optimize=True)
+        elif fmt == "WEBP":
             picture.save(buffer, format="WEBP", quality=int(quality), method=4)
         else:
             # progressive + optimize cost nothing at encode time and buy
@@ -135,6 +144,10 @@ class AdaptiveImageCompressor:
         if max(height, width) <= WEBP_MAX_SIDE:
             return list(self.formats)
         return [f for f in self.formats if f != "WEBP"] or ["JPEG"]
+
+    @staticmethod
+    def _is_lossless(fmt: str) -> bool:
+        return fmt in LOSSLESS_FORMATS
 
     # ---------------------------------------------------------------- search
 
@@ -184,7 +197,16 @@ class AdaptiveImageCompressor:
         exponential in it, so interpolating between two bracketing probes in
         log space lands near the answer immediately. Bisecting the same range
         needs about seven probes per resize factor; this needs about three.
+
+        A lossless format has nothing to search: one encode decides it.
         """
+        if fmt in LOSSLESS_FORMATS:
+            pixels, data = self._encode(image_rgb, resize, QUALITY_MAX, fmt)
+            budget.encodes += 1
+            if len(data) > target_bytes:
+                return None
+            return Attempt(fmt, resize, QUALITY_MAX, data, pixels)
+
         low, high = QUALITY_MIN, QUALITY_MAX
 
         pixels, low_data = self._encode(image_rgb, resize, low, fmt)
@@ -253,7 +275,11 @@ class AdaptiveImageCompressor:
     ) -> Attempt:
         """Nothing fits the budget -- return the smallest file we can make."""
         smallest = None
-        for fmt in formats:
+        # Lossless formats are excluded here on purpose: this path runs when
+        # nothing fits, so the goal is the smallest file achievable, and a
+        # lossless encoder is the worst possible choice for that.
+        lossy = [f for f in formats if not self._is_lossless(f)] or ["JPEG"]
+        for fmt in lossy:
             pixels, data = self._encode(image_rgb, RESIZE_GRID[-1], QUALITY_MIN, fmt)
             budget.encodes += 1
             attempt = Attempt(fmt, RESIZE_GRID[-1], QUALITY_MIN, data, pixels)
@@ -302,7 +328,15 @@ class AdaptiveImageCompressor:
         # equal quality for a smaller file is a strict win.
         best = max(attempt.score for attempt in fitting)
         close = [a for a in fitting if a.score >= best - SCORE_TOLERANCE]
-        return max(close, key=lambda a: (a.resize, -a.size))
+        # Lossless first inside the band. The tolerance exists to stop the
+        # search trading resolution for noise-level SSIM differences, but
+        # applied to format choice it had a worse effect: on glyph art, WebP
+        # scored 0.9995 against PNG's exact 1.0 and won by being 0.27 KB
+        # smaller -- with 59 KB of the budget still unspent. An exact
+        # reproduction is categorically different from a very close one, and
+        # SSIM on luma also understates ringing around hard edges, which is
+        # precisely the content where a lossless encoder wins.
+        return max(close, key=lambda a: (self._is_lossless(a.fmt), a.resize, -a.size))
 
     # --------------------------------------------------------------- public
 

@@ -126,10 +126,13 @@ class CompressionTests(unittest.TestCase):
         self.assertEqual(candidate.shape[0], array.shape[0] // 2)
 
     def test_search_is_cheap(self):
-        # The old exhaustive sweep spent ~69 encodes per call. Interpolating
-        # on log-size should need an order of magnitude fewer.
+        # The old exhaustive sweep spent ~69 encodes per call. Interpolating on
+        # log-size costs ~3 per lossy candidate and 1 per lossless one, so with
+        # three formats over four resize candidates the benchmark measures
+        # mean 20, max 37. 45 leaves headroom without hiding a regression back
+        # toward sweeping.
         result = self.compressor.compress(self.image, 60)
-        self.assertLess(result["encodes"], 25, "search got expensive again")
+        self.assertLess(result["encodes"], 45, "search got expensive again")
 
     def test_reported_bytes_are_the_downloadable_bytes(self):
         # The app hands raw_bytes to the download button, so it has to be the
@@ -140,7 +143,23 @@ class CompressionTests(unittest.TestCase):
 
     def test_picks_a_supported_format(self):
         result = self.compressor.compress(self.image, 60)
-        self.assertIn(result["format"], ("JPEG", "WEBP"))
+        self.assertIn(result["format"], ("JPEG", "WEBP", "PNG"))
+
+    def test_lossless_wins_on_flat_art(self):
+        # A PNG of glyph-like art is both smaller and perfect. If the search
+        # picks a lossy encoder here it is leaving free quality on the table.
+        art = np.full((300, 300, 3), 245, dtype=np.uint8)
+        art[40:80, :, :] = 30
+        art[:, 120:150, :] = [200, 40, 60]
+        result = AdaptiveImageCompressor().compress(Image.fromarray(art), 60)
+        self.assertEqual(result["format"], "PNG")
+        self.assertAlmostEqual(result["ssim"], 1.0, places=6)
+
+    def test_lossless_is_not_used_when_nothing_fits(self):
+        # When even the smallest encode overshoots, the goal is the smallest
+        # possible file -- the worst possible moment to pick a lossless codec.
+        result = AdaptiveImageCompressor().compress(self.image, 0.5)
+        self.assertNotEqual(result["format"], "PNG")
 
     def test_format_can_be_forced(self):
         for fmt in ("JPEG", "WEBP"):

@@ -2,6 +2,7 @@
 
     pixelopt photo.jpg --target 200
     pixelopt *.jpg --target 150 --out-dir web/ --format webp
+    pixelopt scan.png --target 300 --enhance scan
 
 A size-targeting compressor earns its keep in batch jobs, which is exactly
 what a web upload form cannot do.
@@ -14,7 +15,10 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-from .adaptive_compressor import SUPPORTED_FORMATS, AdaptiveImageCompressor
+from .adaptive_compressor import AdaptiveImageCompressor
+from .enhance import PRESETS, Enhancements, auto_enhancements, preset, with_overrides
+from .image_features import load_image
+from .pipeline import process
 
 READABLE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -30,11 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("inputs", nargs="+", type=Path, help="image files to compress")
     parser.add_argument(
-        "-t",
-        "--target",
-        type=float,
-        required=True,
-        metavar="KB",
+        "-t", "--target", type=float, required=True, metavar="KB",
         help="maximum output size in KB",
     )
     destination = parser.add_mutually_exclusive_group()
@@ -42,26 +42,38 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--out", type=Path, help="output file (single input only)"
     )
     destination.add_argument(
-        "-d",
-        "--out-dir",
-        type=Path,
+        "-d", "--out-dir", type=Path,
         help="directory to write into (default: alongside each input)",
     )
     parser.add_argument(
-        "-f",
-        "--format",
-        choices=("auto", "jpeg", "webp"),
-        default="auto",
-        help="encoder to use; auto tries both and keeps the better one",
+        "-f", "--format", choices=("auto", "jpeg", "webp", "png"), default="auto",
+        help="encoder to use; auto tries all and keeps the best at the budget",
     )
+
+    group = parser.add_argument_group(
+        "enhancement",
+        "Applied before encoding. 'auto' measures the image noise and denoises "
+        "only when it is worth doing -- denoising first improved quality in "
+        "every tested condition, because noise is the most expensive thing an "
+        "encoder can be asked to store.",
+    )
+    group.add_argument(
+        "-e", "--enhance", default="none",
+        choices=tuple(sorted(PRESETS)) + ("auto",),
+        help="enhancement preset (default: none)",
+    )
+    group.add_argument("--denoise", type=float, metavar="N", help="filter strength, 0 to disable")
+    group.add_argument("--sharpen", type=float, metavar="N", help="unsharp amount, 0 to disable")
+    group.add_argument("--contrast", type=float, metavar="N", help="CLAHE clip limit, 0 to disable")
+    group.add_argument("--saturation", type=float, metavar="N", help="1.0 leaves colour unchanged")
+    group.add_argument("--white-balance", action="store_true", default=None, help="gray-world correction")
+    group.add_argument("--auto-level", action="store_true", default=None, help="stretch the tonal range")
+
     parser.add_argument(
-        "--overwrite",
-        action="store_true",
+        "--overwrite", action="store_true",
         help="replace existing output files instead of skipping them",
     )
-    parser.add_argument(
-        "-q", "--quiet", action="store_true", help="only report failures"
-    )
+    parser.add_argument("-q", "--quiet", action="store_true", help="only report failures")
     return parser
 
 
@@ -72,6 +84,28 @@ def _destination(
         return out
     folder = out_dir if out_dir is not None else source.parent
     return folder / f"{source.stem}_compressed.{extension}"
+
+
+def _settings_for(args, source: Path) -> Enhancements:
+    """Resolve preset plus explicit flags into one settings object.
+
+    'auto' has to look at the pixels, so it is resolved per image rather than
+    once for the batch -- a run of photos from different cameras will not all
+    want the same filter strength.
+    """
+    if args.enhance == "auto":
+        base = auto_enhancements(load_image(source))
+    else:
+        base = preset(args.enhance)
+    return with_overrides(
+        base,
+        denoise=args.denoise,
+        sharpen=args.sharpen,
+        contrast=args.contrast,
+        saturation=args.saturation,
+        white_balance=args.white_balance,
+        auto_level=args.auto_level,
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -102,7 +136,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             failures += 1
             continue
         try:
-            result = compressor.compress(source, args.target, image_format=image_format)
+            settings = _settings_for(args, source)
+            result = process(
+                source,
+                args.target,
+                enhancements=settings,
+                image_format=image_format,
+                compressor=compressor,
+            )
         except Exception as error:  # a bad file should not abort the batch
             print(f"{source}: {error}", file=sys.stderr)
             failures += 1
@@ -131,8 +172,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rows.append(
             f"{source.name:<24}{original_kb:>9.1f}K ->{actual_kb:>8.1f}K"
             f"{str(result['format']):>6}{dimensions:>12}"
-            f"   SSIM {float(result['ssim']):.3f}   {note}"
+            f"   SSIM {float(result['fidelity_ssim']):.3f}   {note}"
         )
+        if result["enhanced"]:
+            # Drift is not an error -- on a noisy photo a large drift is the
+            # denoiser working -- but it is also what overprocessing looks
+            # like, so it goes next to the steps that caused it.
+            rows.append(
+                f"{'':<24}  enhanced: {', '.join(result['enhancement_steps'])}"
+                f"  (drift {float(result['drift_ssim']):.3f}, "
+                f"noise {float(result['noise_before']):.1f} -> "
+                f"{float(result['noise_after']):.1f})"
+            )
 
     if rows and not args.quiet:
         print(f"target {args.target:g} KB\n")
