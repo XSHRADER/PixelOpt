@@ -33,6 +33,13 @@ jobs:
         run: |
           python tests/test_compression.py -v
           python tests/test_enhance.py -v
+          python tests/test_features.py -v
+          python tests/test_launcher.py -v
+
+      # The real launch path end to end: preflight, engine self-test, Streamlit
+      # start-up and the health check, then a clean shutdown.
+      - name: Smoke-test the launcher
+        run: python launch.py --once --no-browser --no-venv
 
       # The CLI is the entry point most likely to break silently: nothing else
       # exercises the console script, the batch loop or the overwrite guard.
