@@ -30,17 +30,26 @@ files = st.file_uploader("Images", type=UPLOAD_TYPES, accept_multiple_files=True
 
 with st.container(border=True, key="po_card_batch_settings"):
     mode = st.segmented_control(
-        "Mode", ["target", "form"], default="target", key="batch_mode",
-        format_func={"target": "Target size", "form": "Form photo"}.get,
+        "Mode", ["target", "quality", "form"], default="target", key="batch_mode",
+        format_func={"target": "Target size", "quality": "Quality target",
+                     "form": "Form photo"}.get,
     ) or "target"
-    if mode == "target":
+    if mode in ("target", "quality"):
         c1, c2, c3 = st.columns([2, 1, 1])
-        target_kb = c1.slider("Target size", 10, 2000, 200, 10, format="%d KB",
-                              key="batch_target")
+        if mode == "target":
+            target_kb, min_ssim = c1.slider("Target size", 10, 2000, 200, 10, format="%d KB",
+                                            key="batch_target"), None
+        else:
+            target_kb = None
+            min_ssim = c1.slider("Minimum fidelity (SSIM)", 0.900, 0.999, 0.980, 0.001,
+                                 format="%.3f", key="batch_min_ssim",
+                                 help="Each image becomes the smallest file that meets this.")
         fmt_choice = c2.selectbox("Encoder", ["Auto", "JPEG", "WebP", "PNG"], key="batch_fmt")
         enhancement = c3.selectbox("Enhancement", ["Auto", *sorted(PRESETS)], key="batch_enh",
                                    help="Auto is decided per image from its own noise level.")
-        settings_signature = ("target", target_kb, fmt_choice, enhancement)
+        st.caption(":material/verified: Files that already meet the goal are kept as they "
+                   "are, with their metadata (including GPS location) removed.")
+        settings_signature = (mode, target_kb, min_ssim, fmt_choice, enhancement)
     else:
         preset_key = st.selectbox(
             "Form preset", list(FORM_PRESETS), key="batch_form",
@@ -51,8 +60,8 @@ with st.container(border=True, key="po_card_batch_settings"):
         )
         settings_signature = ("form", preset_key)
     measure = st.toggle("Measure damaged area", value=True, key="batch_measure",
-                        help="Adds a local-SSIM damage measurement per image, on a "
-                             "reduced copy to keep it quick.")
+                        help="Adds a full-resolution local-SSIM damage measurement "
+                             "per image.")
 
 if not files:
     with st.container(horizontal=True, gap="medium"):
@@ -79,9 +88,9 @@ run = st.button(f"Process {len(payloads)} image{'s' if len(payloads) != 1 else '
                 type="primary", icon=":material/play_arrow:", key="batch_run")
 
 if run:
-    if mode == "target":
+    if mode in ("target", "quality"):
         job = target_job(target_kb, None if fmt_choice == "Auto" else fmt_choice.upper(),
-                         enhancement, measure)
+                         enhancement, measure, min_ssim=min_ssim)
     else:
         job = form_job(FORM_PRESETS[preset_key], measure)
 

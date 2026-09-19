@@ -18,7 +18,7 @@ from typing import List, Optional, Sequence
 from .adaptive_compressor import AdaptiveImageCompressor
 from .enhance import PRESETS, Enhancements, auto_enhancements, preset, with_overrides
 from .image_features import load_image
-from .pipeline import process
+from .pipeline import process, process_to_quality
 
 READABLE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -33,9 +33,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("inputs", nargs="+", type=Path, help="image files to compress")
-    parser.add_argument(
-        "-t", "--target", type=float, required=True, metavar="KB",
-        help="maximum output size in KB",
+    goal = parser.add_mutually_exclusive_group(required=True)
+    goal.add_argument(
+        "-t", "--target", type=float, metavar="KB",
+        help="maximum output size in KB: the best quality that fits",
+    )
+    goal.add_argument(
+        "-s", "--min-ssim", type=float, metavar="SSIM",
+        help="minimum fidelity, e.g. 0.98: the smallest file that meets it",
     )
     destination = parser.add_mutually_exclusive_group()
     destination.add_argument(
@@ -72,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--overwrite", action="store_true",
         help="replace existing output files instead of skipping them",
+    )
+    parser.add_argument(
+        "--always-reencode", action="store_true",
+        help="re-encode even when the original already fits (by default it is "
+             "kept, minus its metadata)",
     )
     parser.add_argument("-q", "--quiet", action="store_true", help="only report failures")
     return parser
@@ -114,8 +124,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.out is not None and len(args.inputs) > 1:
         parser.error("--out takes a single input; use --out-dir for several")
-    if args.target <= 0:
+    if args.target is not None and args.target <= 0:
         parser.error("--target must be greater than zero")
+    if args.min_ssim is not None and not (0.5 <= args.min_ssim <= 0.9999):
+        parser.error("--min-ssim must be between 0.5 and 0.9999")
 
     missing = [str(path) for path in args.inputs if not path.is_file()]
     if missing:
@@ -137,13 +149,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
         try:
             settings = _settings_for(args, source)
-            result = process(
-                source,
-                args.target,
-                enhancements=settings,
-                image_format=image_format,
-                compressor=compressor,
-            )
+            if args.min_ssim is not None:
+                result = process_to_quality(
+                    source, args.min_ssim, enhancements=settings,
+                    image_format=image_format,
+                    allow_passthrough=not args.always_reencode,
+                )
+            else:
+                result = process(
+                    source, args.target, enhancements=settings,
+                    image_format=image_format, compressor=compressor,
+                    allow_passthrough=not args.always_reencode,
+                )
         except Exception as error:  # a bad file should not abort the batch
             print(f"{source}: {error}", file=sys.stderr)
             failures += 1
@@ -162,15 +179,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         original_kb = source.stat().st_size / 1024.0
         actual_kb = float(result["actual_size_kb"])
         dimensions = f"{result['width']}x{result['height']}"
-        if actual_kb > original_kb * 1.005:
-            # Re-encoding a file that already fits can make it bigger -- a
-            # lossless PNG of flat or glyph-like art beats any lossy encoder.
-            # Say so plainly rather than reporting "0.2x smaller".
-            note = "LARGER than input; the original already fits"
+        if result.get("passthrough"):
+            removed = int(result.get("metadata_removed_bytes", 0))
+            note = (f"original kept, {removed:,} bytes of metadata removed"
+                    if removed else "original kept unchanged")
+        elif actual_kb > original_kb * 1.005:
+            # A re-encode can still come out bigger, e.g. under --always-reencode
+            # or a forced format. Say so plainly rather than "0.2x smaller".
+            note = "LARGER than input"
         elif actual_kb >= original_kb * 0.995:
-            # An already-optimal PNG re-encodes to the same bytes. Calling
-            # that "LARGER" was wrong, and the sample screenshot showed it.
-            note = "same size as input; the original already fits"
+            note = "same size as input"
         else:
             note = f"{original_kb / max(actual_kb, 1e-9):.1f}x smaller"
         rows.append(
@@ -178,6 +196,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"{str(result['format']):>6}{dimensions:>12}"
             f"   SSIM {float(result['fidelity_ssim']):.3f}   {note}"
         )
+        if args.min_ssim is not None and not result.get("met", True):
+            rows.append(f"{'':<24}  SSIM {args.min_ssim:g} is out of reach with this "
+                        "encoder; this is the closest it gets")
         if result["enhanced"]:
             # Drift is not an error -- on a noisy photo a large drift is the
             # denoiser working -- but it is also what overprocessing looks
@@ -190,7 +211,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
 
     if rows and not args.quiet:
-        print(f"target {args.target:g} KB\n")
+        goal = (f"target {args.target:g} KB" if args.target is not None
+                else f"target SSIM >= {args.min_ssim:g}")
+        print(goal + "\n")
         for row in rows:
             print(row)
 

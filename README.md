@@ -166,6 +166,51 @@ and matplotlib are all gone, along with a 3 MB committed model file.
 - A Streamlit app with top navigation, a batch CLI, and a reproducible
   benchmark.
 
+## Quality target mode
+
+The size search answers "how good can this be in N KB". Quality target mode
+answers the other question: *the smallest file that still has SSIM ≥ 0.98*.
+Pick **Quality target** under Goal in the app, or pass `--min-ssim` to the CLI.
+
+```bash
+pixelopt photo.jpg --min-ssim 0.98
+```
+
+For each encoder the search walks resolutions downward from full size, and at
+each one looks for the lowest quality setting that meets the target,
+interpolating on the scores rather than sweeping. Every probe is scored on
+128-pixel tiles taken at full resolution, and the winner is checked again on
+the whole image with the same metric the result reports. Lossless PNG always
+meets any target, so under Auto a result always exists; with a restricted
+encoder an unreachable target is reported rather than hidden.
+
+Scoring on a downscaled copy was tried first and abandoned. Shrinking both
+images smooths the compression damage away before SSIM can see it, so
+downscaled candidates passed the cheap check and failed the real one. On a
+12 MP image that cost 50 full-size corrections and 240 seconds; full-resolution
+tiles need one check. Large images are still the slow case — about 30–60 s at
+12 MP, against roughly 17 s in size mode — mostly spent encoding WebP at full
+resolution.
+
+## Keeping originals that already fit
+
+Re-encoding a JPEG that is already under budget loses detail a second time
+(generation loss) to save bytes nobody asked to save. So when nothing needs to
+change the pixels and the upload already fits, PixelOpt returns the upload
+itself — rewritten losslessly to remove EXIF, GPS location, XMP and comments,
+with the compressed image data copied byte for byte and the colour profile
+kept.
+
+Two checks keep that safe. The stripped file is decoded and compared with the
+reference pixel for pixel, and anything that does not match exactly is
+refused — which also catches a phone photo whose EXIF orientation flag rotates
+it, since stripping the flag would turn it sideways; that file is re-encoded
+upright as before. And transparent or animated files are never passed
+through. In quality target mode the original competes on size: it is exact,
+so it wins whenever it is also the smallest file that meets the target, or
+when no re-encode reaches the target at all. `--always-reencode` turns this
+off.
+
 ## Form photo mode
 
 Upload forms ask for things a general compressor never handles: *a JPEG of

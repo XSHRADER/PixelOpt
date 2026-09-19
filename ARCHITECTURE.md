@@ -109,6 +109,8 @@ how a photograph is meant to look, and that is not the tool's call.
 | `pixelopt/adaptive_compressor.py` | the search, the encoders, the public `compress()` |
 | `pixelopt/enhance.py` | enhancement operations, noise estimation, presets |
 | `pixelopt/pipeline.py` | enhance-then-compress, the reference split, the R-D curve |
+| `pixelopt/quality_target.py` | smallest file meeting a minimum SSIM, scored on full-resolution tiles |
+| `pixelopt/passthrough.py` | keep a fitting original: lossless metadata strip for JPEG, PNG and WebP, pixel-verified |
 | `pixelopt/forms.py` | form photo mode: exact framing, both KB readings, comment-segment padding |
 | `pixelopt/analysis.py` | full-resolution damage map, damage summary, heatmap layer |
 | `pixelopt/batch.py` | run a job over many files with failures isolated; ZIP and CSV export |

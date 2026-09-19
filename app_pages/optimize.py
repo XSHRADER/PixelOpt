@@ -16,7 +16,9 @@ from app_shared import (
     curve_points,
     decode,
     process_view,
+    quality_view,
     run_process,
+    run_quality,
 )
 from pixelopt.enhance import PRESETS, Enhancements, auto_enhancements, preset
 from pixelopt.image_features import has_transparency
@@ -73,23 +75,44 @@ if has_transparency(Image.open(io.BytesIO(raw))):
 with st.container(border=True, key="po_card_controls"):
     left, right = st.columns([3, 2], gap="large")
     with left:
-        target_kb = st.slider(
-            "Target size", min_value=10, max_value=2000, value=200, step=10,
-            format="%d KB", key="optimize_target",
-            help="The output never exceeds this. It may land well under when the "
-                 "image cannot fill the budget.",
-        )
-        bpp = target_kb * 1024 * 8 / max(width * height, 1)
-        st.caption(
-            f"{width} × {height} · {width * height / 1e6:.1f} MP · "
-            f"**{bpp:.2f} bits per pixel** at this budget"
-        )
-        st.markdown(
-            ":material/hd: Above ~0.5 bpp, full resolution wins — only quality is tuned."
-            if bpp >= 0.5 else
-            ":material/photo_size_select_small: Below ~0.35 bpp, downscaling first "
-            "keeps more detail than it costs."
-        )
+        goal = st.segmented_control(
+            "Goal", ["size", "quality"], default="size", key="optimize_goal",
+            format_func={"size": "Size limit", "quality": "Quality target"}.get,
+            help="Size limit: the best quality that fits a budget. Quality target: "
+                 "the smallest file that still meets a fidelity you choose.",
+        ) or "size"
+        if goal == "size":
+            min_ssim = None
+            target_kb = st.slider(
+                "Target size", min_value=10, max_value=2000, value=200, step=10,
+                format="%d KB", key="optimize_target",
+                help="The output never exceeds this. It may land well under when "
+                     "the image cannot fill the budget.",
+            )
+            bpp = target_kb * 1024 * 8 / max(width * height, 1)
+            st.caption(
+                f"{width} × {height} · {width * height / 1e6:.1f} MP · "
+                f"**{bpp:.2f} bits per pixel** at this budget"
+            )
+            st.markdown(
+                ":material/hd: Above ~0.5 bpp, full resolution wins — only quality is tuned."
+                if bpp >= 0.5 else
+                ":material/photo_size_select_small: Below ~0.35 bpp, downscaling first "
+                "keeps more detail than it costs."
+            )
+        else:
+            target_kb = None
+            min_ssim = st.slider(
+                "Minimum fidelity (SSIM)", min_value=0.900, max_value=0.999, value=0.980,
+                step=0.001, format="%.3f", key="optimize_min_ssim",
+                help="The smallest file whose SSIM against the reference is at least "
+                     "this. Higher stays closer to the reference and costs more bytes.",
+            )
+            st.caption(
+                f"{width} × {height} · {width * height / 1e6:.1f} MP · the search tries "
+                "each encoder at falling resolutions and keeps the smallest file that "
+                "passes. Large images take longer here than in size mode."
+            )
     with right:
         fmt_choice = st.segmented_control(
             "Encoder", ["Auto", "JPEG", "WebP", "PNG"], default="Auto",
@@ -131,15 +154,42 @@ with st.expander(":material/tune: Fine-tune enhancement"):
 
 # ------------------------------------------------------------------ result
 
-with st.spinner("Searching for the best encoding within the budget…"):
-    result = run_process(raw, float(target_kb), settings, image_format)
-    view = process_view(raw, float(target_kb), settings, image_format)
+if goal == "size":
+    with st.spinner("Searching for the best encoding within the budget…"):
+        result = run_process(raw, float(target_kb), settings, image_format)
+        view = process_view(raw, float(target_kb), settings, image_format)
+else:
+    with st.spinner("Searching for the smallest file that meets the target…"):
+        result = run_quality(raw, float(min_ssim), settings, image_format)
+        view = quality_view(raw, float(min_ssim), settings, image_format)
 
 original_kb = len(raw) / 1024.0
 actual_kb = float(result["actual_size_kb"])
 fidelity = float(result["fidelity_ssim"])
 damage = view["summary"]
+kept = bool(result.get("passthrough"))
+met = bool(result.get("met", True))
 
+if kept:
+    removed = int(result.get("metadata_removed_bytes", 0))
+    st.success(
+        ("Your original already fits, so it was kept as it is"
+         if goal == "size" else
+         "Your original is already the smallest file that meets the target, so it was kept")
+        + " — identical pixels, no second round of compression. "
+        + (f"{removed:,} bytes of metadata (EXIF, GPS location, comments) were removed."
+           if removed else "It carried no metadata to remove."),
+        icon=":material/verified:",
+    )
+elif goal == "quality" and not met:
+    st.warning(
+        f"No {fmt_choice if image_format else ''} encode reaches SSIM {min_ssim:.3f}; "
+        "this is the closest it gets. Choose Auto to allow lossless PNG, which always "
+        "meets the target.",
+        icon=":material/warning:",
+    )
+
+quality_label = "original" if result.get("quality") is None else f"q{result['quality']}"
 metric_strip(
     [
         {"label": "Output size", "value": actual_kb, "decimals": 1, "suffix": " KB",
@@ -147,11 +197,12 @@ metric_strip(
                  if actual_kb < original_kb else "not smaller than the source",
          "tone": "good" if actual_kb < original_kb else "warn"},
         {"label": "Fidelity (SSIM)", "value": fidelity, "decimals": 4,
-         "hint": "against the reference", "tone": tone(fidelity, 0.98, 0.93)},
+         "hint": (f"target ≥ {min_ssim:.3f}" if goal == "quality" else "against the reference"),
+         "tone": ("good" if met else "bad") if goal == "quality" else tone(fidelity, 0.98, 0.93)},
         {"label": "Damaged area", "value": damage["damaged_share"] * 100, "decimals": 1,
          "suffix": "%", "hint": "local SSIM below 0.9",
          "tone": tone(damage["damaged_share"], 0.02, 0.15, higher_is_better=False)},
-        {"label": "Encoder", "text": f"{result['format']} · q{result['quality']}",
+        {"label": "Encoder", "text": f"{result['format']} · {quality_label}",
          "hint": f"resize {float(result['resize_factor']):.2f}×"},
         {"label": "Dimensions", "text": f"{result['width']} × {result['height']}",
          "hint": f"from {width} × {height}"},
@@ -215,7 +266,7 @@ with curve_tab:
         with st.spinner("Measuring quality across budgets…"):
             ceiling = ceiling_kb(raw, settings, image_format)
             ladder = {max(3, round(ceiling * f)) for f in (0.04, 0.08, 0.15, 0.28, 0.45, 0.7, 1.0)}
-            if target_kb < ceiling:
+            if target_kb is not None and target_kb < ceiling:
                 ladder.add(int(target_kb))
             points = curve_points(raw, settings, image_format, tuple(sorted(ladder)))
         frame = pd.DataFrame(points)
@@ -255,10 +306,11 @@ with detail_tab:
         st.markdown("#### Encoding")
         st.table({
             "Encoder": str(result["format"]),
-            "Quality": str(result["quality"]),
+            "Quality": quality_label,
             "Resize factor": f"{float(result['resize_factor']):.3f}",
             "Dimensions": f"{result['width']} × {result['height']}",
-            "Target": f"{float(result['target_size_kb']):.0f} KB",
+            "Target": (f"{target_kb} KB" if goal == "size" else f"SSIM >= {min_ssim:.3f}"),
+            "Original kept": "yes, metadata removed" if kept else "no",
             "Actual": f"{actual_kb:.2f} KB",
             "Encoder calls": str(result["encodes"]),
         })

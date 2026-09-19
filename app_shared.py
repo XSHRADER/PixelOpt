@@ -26,7 +26,7 @@ from pixelopt.batch import summarize
 from pixelopt.enhance import Enhancements, auto_enhancements, estimate_noise, preset
 from pixelopt.forms import FormSpec, encode_for_form
 from pixelopt.image_features import load_image
-from pixelopt.pipeline import process, rate_distortion_curve
+from pixelopt.pipeline import process, process_to_quality, rate_distortion_curve
 from ui_components import bytes_data_url, image_data_url, rgba_data_url
 
 UPLOAD_TYPES = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"]
@@ -58,6 +58,12 @@ def run_process(raw: bytes, target_kb: float, settings: Enhancements, fmt: Optio
 
 
 @st.cache_data(show_spinner=False, max_entries=24)
+def run_quality(raw: bytes, min_ssim: float, settings: Enhancements, fmt: Optional[str]):
+    return process_to_quality(io.BytesIO(raw), min_ssim, enhancements=settings,
+                              image_format=fmt)
+
+
+@st.cache_data(show_spinner=False, max_entries=24)
 def run_form(raw: bytes, spec: FormSpec):
     return encode_for_form(io.BytesIO(raw), spec)
 
@@ -86,6 +92,11 @@ def _view_payload(result: Dict[str, object]) -> Dict[str, object]:
 @st.cache_data(show_spinner=False, max_entries=16)
 def process_view(raw: bytes, target_kb: float, settings: Enhancements, fmt: Optional[str]):
     return _view_payload(run_process(raw, target_kb, settings, fmt))
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def quality_view(raw: bytes, min_ssim: float, settings: Enhancements, fmt: Optional[str]):
+    return _view_payload(run_quality(raw, min_ssim, settings, fmt))
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
@@ -125,15 +136,32 @@ def _damaged_share(result: Dict[str, object]) -> float:
     return damage_summary(loss)["damaged_share"]
 
 
-def target_job(target_kb: float, fmt: Optional[str], enhancement: str,
-               measure: bool) -> Callable[[str, bytes], Dict[str, object]]:
+def target_job(target_kb: Optional[float], fmt: Optional[str], enhancement: str,
+               measure: bool, min_ssim: Optional[float] = None
+               ) -> Callable[[str, bytes], Dict[str, object]]:
+    """A size-limit job, or a quality-target job when `min_ssim` is given."""
     def job(name: str, raw: bytes) -> Dict[str, object]:
         image = load_image(io.BytesIO(raw))
         # Auto is resolved per image: a batch from different cameras will not
         # all want the same filter strength.
         settings = auto_enhancements(image) if enhancement == "Auto" else preset(enhancement)
-        result = process(image, float(target_kb), enhancements=settings, image_format=fmt)
-        return summarize(result, _damaged_share(result) if measure else None)
+        # The raw bytes, not the decoded array, so a file that already fits
+        # can be kept as it is.
+        if min_ssim is not None:
+            result = process_to_quality(io.BytesIO(raw), float(min_ssim),
+                                        enhancements=settings, image_format=fmt)
+        else:
+            result = process(io.BytesIO(raw), float(target_kb), enhancements=settings,
+                             image_format=fmt)
+        summary = summarize(result, _damaged_share(result) if measure else None)
+        if result.get("passthrough"):
+            removed = int(result.get("metadata_removed_bytes", 0))
+            kept = ("original kept, " + f"{removed:,} bytes of metadata removed"
+                    if removed else "original kept unchanged")
+            summary["notes"] = kept + ("; " + summary["notes"] if summary["notes"] else "")
+        if min_ssim is not None and not result.get("met", True):
+            summary["notes"] = "TARGET MISSED; " + summary["notes"]
+        return summary
     return job
 
 
