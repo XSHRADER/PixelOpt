@@ -159,17 +159,72 @@ and matplotlib are all gone, along with a 3 MB committed model file.
 - Composites transparency onto white instead of silently dropping the alpha.
 - Reports SSIM, PSNR and MSE against the original at full resolution.
 - Hands the download button the exact bytes that were measured.
-- Includes a Streamlit app, a batch CLI, and a reproducible benchmark.
+- Form photo mode: exact dimensions, a size range that holds under both
+  kilobyte readings, and a crop that follows a face or the detail.
+- Batch mode in the app, with failures isolated and a ZIP plus CSV report.
+- A full-resolution damage heatmap and damaged-area measurement.
+- A Streamlit app with top navigation, a batch CLI, and a reproducible
+  benchmark.
+
+## Form photo mode
+
+Upload forms ask for things a general compressor never handles: *a JPEG of
+exactly 200 × 230 pixels, between 20 and 50 KB*. Form photo mode meets that.
+
+- **Exact dimensions.** The crop anchors on a detected face, or on the most
+  detailed region, rather than blindly taking the centre. "Fit on white" keeps
+  everything, which is safer for signatures.
+- **A size range, not just a ceiling.** Portals disagree on whether a KB is
+  1000 or 1024 bytes, which is a common reason for a rejected upload. The limits
+  are applied so the file passes under *both* readings: the maximum in 1000-byte
+  KB, the minimum in 1024-byte KB.
+- **Honest padding.** An image too simple to reach the minimum even at quality
+  100 is padded with JPEG comment bytes. The pixels are untouched, and the app
+  reports exactly how many bytes were added.
+- **Portal-safe output.** Baseline (not progressive) JPEG, optional grayscale,
+  and the DPI written into the file.
+
+Presets cover an application photo, signature, passport 35 × 45 mm, a 2 × 2 in
+square and a profile thumbnail. They are common sizes, not any organisation's
+official specification.
+
+## Batch mode
+
+Upload many images, apply one set of settings — a target size or a form
+preset — and download a ZIP plus `report.csv`. A corrupt file is recorded and
+the rest carry on. `photo.png` and `photo.jpg` get distinct output names, not
+one silently overwriting the other. The ZIP holds exactly the bytes the report
+describes.
+
+## Damage heatmap
+
+A single SSIM number cannot say *where* quality was lost: the same 0.97 can be
+damage spread thinly everywhere or a ruined face on an otherwise clean frame.
+SSIM is the mean of a local similarity map, so PixelOpt keeps the map. The
+viewer overlays it (brighter = more loss), outlines the worst region, and
+reports the **damaged area**: the share of the frame whose local SSIM fell below
+0.9, roughly where damage becomes visible at 1:1.
+
+The map is measured at full resolution. Downscaling first averages the
+artefacts away before SSIM can see them: on a faded scan the damaged share read
+86% at full resolution, 52% after a barely visible downscale, and 0.4% at
+400k pixels, all for the same file.
 
 ## Project layout
 
 - `pixelopt/adaptive_compressor.py` — the search and the encoding pipeline.
 - `pixelopt/enhance.py` — enhancement operations and noise measurement.
 - `pixelopt/pipeline.py` — enhance-then-compress, and the two-reference split.
+- `pixelopt/forms.py` — form photo mode: framing, both KB readings, padding.
+- `pixelopt/analysis.py` — the damage map, its summary and the heatmap.
+- `pixelopt/batch.py` — running a job over many files, ZIP and CSV export.
 - `pixelopt/image_features.py` — loading, content statistics, quality metrics.
 - `pixelopt/cli.py` — command-line entry point.
-- `app.py` — Streamlit web interface.
-- `ui_components.py` — the zoomable before/after comparison (Components v2).
+- `app.py` — Streamlit entry point: theme, styling, top navigation.
+- `app_pages/` — the Optimize, Form photo and Batch pages.
+- `app_shared.py` — cached Streamlit helpers shared by the pages.
+- `ui_components.py` — hero, count-up metrics, range meter and the
+  slide / flicker / heatmap comparison viewer (Components v2).
 - `benchmark.py` — reproducible measurements behind the table above.
 - `tests/test_compression.py` — unit tests.
 
@@ -211,11 +266,30 @@ not abort the batch.
 
 1. Open a terminal in the project folder.
 
-2. Use the built-in launcher on Windows:
+2. Launch it — one command does everything:
 
-   ```bat
-   launch_app.bat
+   ```bash
+   python launch.py
    ```
+
+   On Windows you can double-click `launch_app.bat`; on macOS or Linux run
+   `./launch.sh`. The launcher checks Python, creates or reuses `.venv`,
+   installs dependencies only when `requirements.txt` changes, runs an engine
+   self-test, picks a free port, waits until the app answers its health check,
+   opens your browser, and restarts PixelOpt if it crashes. Running it again
+   while PixelOpt is up just reopens the existing instance.
+
+   | option | what it does |
+   |---|---|
+   | `--check` | run every test suite before launching |
+   | `--once --no-browser` | launch, confirm it is healthy, shut down — a smoke test |
+   | `--port 8600` | preferred port; the next free one is used if it is busy |
+   | `--reinstall` | reinstall dependencies even if unchanged |
+   | `--install-autostart` | start PixelOpt when you log in (Windows, Linux) |
+   | `--remove-autostart` | undo that |
+
+   Logs go to `logs/`. If anything fails, the launcher stops at that stage and
+   prints the reason and the last lines of the log.
 
    Or run manually:
 
@@ -227,7 +301,8 @@ not abort the batch.
    streamlit run app.py --server.headless true --server.address 127.0.0.1 --server.port 8501
    ```
 
-3. Open the browser at `http://127.0.0.1:8501`.
+3. Open the browser at `http://127.0.0.1:8501`. The top navigation switches
+   between **Optimize**, **Form photo** and **Batch**.
 
 4. Upload an image, choose the target output size in KB, and pick a format
    and enhancement preset (or leave both on Auto).
@@ -277,6 +352,7 @@ Resized and compressed outputs shown and downloadable
   chroma artefacts are invisible to the ranking.
 - Per-image tuning of the 0.55 bpp constant, which is a corpus-wide average.
 - Responsive image sets with a generated `srcset` snippet.
-- Face- and saliency-aware budget allocation.
+- Face-aware budget allocation in the general search (form mode already
+  crops around faces).
 - A faster denoiser for very large images: non-local means costs ~0.85s at
   0.8 MP and scales with pixel count.

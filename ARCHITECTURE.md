@@ -109,10 +109,15 @@ how a photograph is meant to look, and that is not the tool's call.
 | `pixelopt/adaptive_compressor.py` | the search, the encoders, the public `compress()` |
 | `pixelopt/enhance.py` | enhancement operations, noise estimation, presets |
 | `pixelopt/pipeline.py` | enhance-then-compress, the reference split, the R-D curve |
+| `pixelopt/forms.py` | form photo mode: exact framing, both KB readings, comment-segment padding |
+| `pixelopt/analysis.py` | full-resolution damage map, damage summary, heatmap layer |
+| `pixelopt/batch.py` | run a job over many files with failures isolated; ZIP and CSV export |
 | `pixelopt/image_features.py` | loading (EXIF, transparency), content stats, quality metrics |
 | `pixelopt/cli.py` | command-line entry point, batch handling |
-| `app.py` | Streamlit interface |
-| `ui_components.py` | the zoomable before/after comparison (Components v2) |
+| `app.py` | Streamlit entry point: page config, styling, top navigation |
+| `app_pages/` | the Optimize, Form photo and Batch pages |
+| `app_shared.py` | cached Streamlit helpers shared by pages, batch job factories |
+| `ui_components.py` | hero, count-up metric strip, range meter, slide/flicker/heatmap viewer |
 | `benchmark.py` | the measurements the README publishes |
 | `tests/test_compression.py` | compressor and loader tests |
 | `tests/test_enhance.py` | enhancement, pipeline and curve tests |
@@ -160,6 +165,33 @@ gradient asked for 100 KB, 200 KB and 500 KB returned the same 28 KB file.
 **Why the download button gets `raw_bytes`.** It used to re-encode the image at
 the reported quality, producing a different file from the one that was measured.
 The exact measured byte string is now what leaves the process.
+
+## Launching
+
+`launch.py` takes a fresh clone to a running app in five stages — preflight,
+environment, dependencies, self-test, launch — and stops at the first failure
+with the reason and a log tail. It uses only the standard library, because it
+has to run before anything is installed. Decisions worth knowing:
+
+- **Installs are keyed on a hash** of `requirements.txt` and `pyproject.toml`,
+  stored in `.venv/.pixelopt-deps.sha256`, plus an import probe. A normal
+  launch never touches pip, and a missing module forces an install even when
+  the hash matches. It never upgrades pip, which the old batch file did on
+  every start.
+- **Streamlit runs in its own process group.** Otherwise Ctrl+C reaches it
+  first, it exits, and the supervisor mistakes a deliberate stop for a crash
+  and restarts it.
+- **Ready means the health endpoint answers**, not that the process started.
+  If the process dies while waiting, the wait ends at once instead of running
+  out the timeout.
+- **Crashes restart** with exponential backoff (2 s, 4 s, 8 s), up to
+  `--max-restarts`, then it gives up and prints the log tail rather than
+  looping forever.
+- **`logs/instance.json`** records the running URL, so a second launch reopens
+  it instead of starting a duplicate. A stale record from a killed launcher is
+  detected by its failing health check and removed.
+- **Autostart** writes a Startup-folder `.cmd` on Windows or an XDG `.desktop`
+  entry on Linux. It launches without a browser and without the self-test.
 
 ## Notes on the Streamlit app
 
