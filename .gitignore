@@ -10,7 +10,14 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Launcher logs and instance record
+logs/
+
 # Packaging artifacts
 *.egg-info/
 build/
 dist/
+
+# Sample images are rebuilt by samples/make_samples.py and samples/run_samples.py
+samples/inputs/
+samples/outputs/
