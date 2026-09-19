@@ -1,23 +1,43 @@
-# Native theming rather than injected CSS: it applies consistently to every
-# element and survives Streamlit upgrades, whereas CSS selectors target
-# internal class names that change between versions.
+# Native theming rather than injected CSS for colour and type: it applies to
+# every element and survives Streamlit upgrades. The palette takes its cues
+# from Linear -- a near-black ground, hairline borders, muted secondary text,
+# one restrained accent -- without borrowing its brand colour.
 
 [theme]
-primaryColor = "#4f7cff"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f4f6fb"
-textColor = "#1d2433"
-linkColor = "#3b5bdb"
-borderColor = "#e1e5ee"
+base = "dark"
+primaryColor = "#7b7fff"
+backgroundColor = "#08090a"
+secondaryBackgroundColor = "#131416"
+codeBackgroundColor = "#131416"
+textColor = "#f7f8f8"
+linkColor = "#a3a6ff"
+borderColor = "#232428"
 showWidgetBorder = true
-baseRadius = "0.6rem"
-buttonRadius = "0.5rem"
-font = "Inter, -apple-system, Segoe UI, Roboto, sans-serif"
-headingFont = "Inter, -apple-system, Segoe UI, Roboto, sans-serif"
-codeFont = "JetBrains Mono, SFMono-Regular, Consolas, monospace"
+showSidebarBorder = false
+baseRadius = "10px"
+buttonRadius = "999px"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+codeFontSize = "0.85rem"
+baseFontSize = 14
+baseFontWeight = 400
+headingFontSizes = ["40px", "26px", "19px", "15px", "14px", "12px"]
+headingFontWeights = [600, 600, 600, 600, 500, 500]
+linkUnderline = false
+chartCategoricalColors = ["#7b7fff", "#4cc38a", "#f5a524", "#ff6b8b", "#5ac8fa", "#b58cff", "#8a8f98"]
+
+blueColor = "#7b7fff"
+violetColor = "#b58cff"
+greenColor = "#4cc38a"
+yellowColor = "#f5a524"
+orangeColor = "#ff9f43"
+redColor = "#ff6b6b"
 
 [theme.sidebar]
-backgroundColor = "#f8fafc"
+backgroundColor = "#0b0c0d"
+secondaryBackgroundColor = "#131416"
+borderColor = "#1d1e21"
 
 [server]
 maxUploadSize = 60
