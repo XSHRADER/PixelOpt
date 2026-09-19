@@ -162,11 +162,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         original_kb = source.stat().st_size / 1024.0
         actual_kb = float(result["actual_size_kb"])
         dimensions = f"{result['width']}x{result['height']}"
-        if actual_kb >= original_kb:
+        if actual_kb > original_kb * 1.005:
             # Re-encoding a file that already fits can make it bigger -- a
             # lossless PNG of flat or glyph-like art beats any lossy encoder.
             # Say so plainly rather than reporting "0.2x smaller".
             note = "LARGER than input; the original already fits"
+        elif actual_kb >= original_kb * 0.995:
+            # An already-optimal PNG re-encodes to the same bytes. Calling
+            # that "LARGER" was wrong, and the sample screenshot showed it.
+            note = "same size as input; the original already fits"
         else:
             note = f"{original_kb / max(actual_kb, 1e-9):.1f}x smaller"
         rows.append(
