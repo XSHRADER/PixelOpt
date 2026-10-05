@@ -119,10 +119,14 @@ how a photograph is meant to look, and that is not the tool's call.
 | `app.py` | Streamlit entry point: page config, styling, top navigation |
 | `app_pages/` | the Optimize, Form photo and Batch pages |
 | `app_shared.py` | cached Streamlit helpers shared by pages, batch job factories |
-| `ui_components.py` | hero, count-up metric strip, range meter, slide/flicker/heatmap viewer |
+| `ui_components.py` | static page header, intro cards, workbench columns, count-up metric strip, range meter, slide/flicker/heatmap viewer |
 | `benchmark.py` | the measurements the README publishes |
 | `tests/test_compression.py` | compressor and loader tests |
 | `tests/test_enhance.py` | enhancement, pipeline and curve tests |
+| `tests/test_features.py` | form photo mode, damage heatmap and batch tests |
+| `tests/test_quality_passthrough.py` | quality-target mode and kept-original tests |
+| `tests/test_launcher.py` | launcher helper tests |
+| `tests/test_app.py` | every page renders (Streamlit AppTest) |
 
 ## Call order
 
@@ -197,7 +201,7 @@ has to run before anything is installed. Decisions worth knowing:
 
 ## Notes on the Streamlit app
 
-Three things there are load-bearing and easy to undo by accident:
+These are load-bearing and easy to undo by accident:
 
 - **The comparison component must be able to zoom.** At fit-to-screen a 200 KB
   and a 500 KB encode of the same photo are indistinguishable; the artefacts
@@ -215,10 +219,27 @@ Three things there are load-bearing and easy to undo by accident:
   well-compressing image can produce, leaving nothing to plot. The ceiling
   probe excludes lossless, because a PNG ceiling is not representative of a
   lossy rate-distortion curve.
+- **The result sits beside its controls.** Each page is a workbench: a
+  control panel on the left, the result on the right. Before this, at
+  1440 × 900 the Optimize comparison started at 978 px and the download
+  button at 1975 px, so every change meant scrolling to see its effect. The
+  uploader is called with identical arguments in the empty state and in the
+  panel, which is what lets it keep its file when it moves.
+- **The viewer caps its height by narrowing, never by letterboxing.** The
+  heatmap and the worst-region box are positioned in percentages of the
+  view box, so the box must keep the image's exact aspect ratio. Each page
+  passes `reserve_px`, the vertical space it needs around the image, measured
+  at 1440 × 900. Adding anything above a viewer means re-measuring it.
 
-Theming is in `.streamlit/config.toml` rather than injected CSS, so it applies
-to every element and survives upgrades. The only hand-written CSS lives inside
-the comparison component, where it belongs.
+Theming is in `.streamlit/config.toml` rather than injected CSS, so it
+applies to every element and survives upgrades. The background is a neutral
+mid-gray, not near-black, because of simultaneous contrast: the colour around
+an image changes how bright and contrasty it looks, and a near-black page
+makes compressed images look punchier than they are, which hides exactly the
+artefacts this app is for. Image editors default to gray for the same reason.
+The custom components read Streamlit's `--st-*` theme variables, so they
+follow the config. The remaining hand-written CSS is small: the header bar,
+intro-card hover, and monospaced figures in the Details tables.
 
 ## Known limitations
 
@@ -245,6 +266,7 @@ python -m pip install -r requirements.txt
 set PYTHONPATH=.                    # or export, on POSIX
 python tests/test_compression.py -v
 python tests/test_enhance.py -v
+python tests/test_app.py -v
 python benchmark.py
 streamlit run app.py
 ```
