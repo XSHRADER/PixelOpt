@@ -35,14 +35,6 @@ UPLOAD_TYPES = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"]
 # The loss map can be 12 MP; the browser only needs a display-sized copy.
 HEATMAP_DISPLAY_SIDE = 1400
 
-CHIPS = (
-    "Resolution from arithmetic", "Log-size interpolation", "SSIM-ranked winner",
-    "JPEG · WebP · lossless PNG", "Measured denoising", "EXIF-aware",
-    "Transparency onto white", "Damage heatmap", "Form photo mode",
-    "Batch ZIP export",
-)
-
-
 def fingerprint(raw: bytes) -> str:
     return hashlib.sha1(raw).hexdigest()
 

@@ -54,6 +54,15 @@ class EmptyStates(unittest.TestCase):
                 for removed in ("po-marquee", "po-grid", "po-glow", "po-rise"):
                     self.assertNotIn(removed, bodies)
 
+    def test_controls_wait_for_an_upload(self):
+        # The control panel is part of the workbench, which needs a file.
+        for name, page in PAGES.items():
+            with self.subTest(page=name):
+                app = run_page(page)
+                self.assertEqual(len(app.slider), 0)
+                self.assertEqual(len(app.number_input), 0)
+                self.assertEqual(len(app.selectbox), 0)
+
 
 class ReferenceDownload(unittest.TestCase):
     def test_png_bytes_is_lossless(self):
