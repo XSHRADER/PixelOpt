@@ -20,7 +20,7 @@ import html
 import io
 import math
 import re
-from typing import TYPE_CHECKING, Dict, Iterable, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import streamlit as st
@@ -179,82 +179,6 @@ def workbench(key: str) -> Tuple["DeltaGenerator", "DeltaGenerator"]:
     """
     left, right = st.columns([1, 2.4], gap="medium")
     return left.container(border=True, key=f"po_panel_{key}"), right
-
-
-# -------------------------------------------------------------------- hero
-
-_HERO_CSS = """
-<style>
-.po-hero { position: relative; padding: 26px 0 18px; margin-bottom: 4px; overflow: hidden;
-  font-family: Inter, -apple-system, "Segoe UI", sans-serif; }
-.po-hero::before { content: ""; position: absolute; left: -10%; top: -60%; width: 70%; height: 260%;
-  background: radial-gradient(50% 45% at 40% 40%, __ACCENT_SOFT__, transparent 70%);
-  filter: blur(8px); pointer-events: none;
-  animation: po-glow 16s ease-in-out infinite alternate; }
-.po-grid { position: absolute; inset: 0; pointer-events: none;
-  background-image: radial-gradient(__DOT__ 1px, transparent 1.3px);
-  background-size: 22px 22px;
-  -webkit-mask-image: radial-gradient(65% 90% at 18% 35%, #000 25%, transparent 75%);
-  mask-image: radial-gradient(65% 90% at 18% 35%, #000 25%, transparent 75%);
-  animation: po-drift 70s linear infinite; }
-.po-eyebrow { position: relative; display: inline-flex; align-items: center; gap: 8px;
-  font-size: 12.5px; font-weight: 500; color: __MUTED__; padding: 4px 11px 4px 9px;
-  border: 1px solid __BORDER__; border-radius: 999px; background: __CARD__;
-  animation: po-rise .6s cubic-bezier(.22,1,.36,1) both; }
-.po-dot { width: 6px; height: 6px; border-radius: 50%; background: __ACCENT__;
-  animation: po-pulse 2.6s ease-out infinite; }
-.po-title { position: relative; margin: 16px 0 10px; font-size: clamp(32px, 4.4vw, 54px);
-  line-height: 1.07; letter-spacing: -0.024em; font-weight: 600; color: __TEXT__; max-width: 20ch; }
-.po-w { display: inline-block; animation: po-rise .75s cubic-bezier(.22,1,.36,1) both; }
-.po-sub { position: relative; max-width: 64ch; margin: 0; font-size: 15.5px; line-height: 1.6;
-  letter-spacing: -0.011em; color: __MUTED__;
-  animation: po-rise .75s cubic-bezier(.22,1,.36,1) .32s both; }
-.po-marquee { position: relative; margin-top: 20px; overflow: hidden;
-  -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
-  mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
-  animation: po-rise .75s cubic-bezier(.22,1,.36,1) .45s both; }
-.po-track { display: flex; width: max-content; animation: po-scroll 42s linear infinite; }
-.po-set { display: flex; gap: 8px; padding-right: 8px; }
-.po-chip { font-size: 12px; color: __MUTED__; padding: 5px 11px; white-space: nowrap;
-  border: 1px solid __BORDER__; border-radius: 999px; background: __CARD__; }
-.po-marquee:hover .po-track { animation-play-state: paused; }
-@keyframes po-rise { from { opacity: 0; transform: translateY(12px); filter: blur(5px); }
-  to { opacity: 1; transform: none; filter: none; } }
-@keyframes po-scroll { to { transform: translateX(-50%); } }
-@keyframes po-drift { to { background-position: 264px 132px; } }
-@keyframes po-glow { to { transform: translate(10%, 4%) scale(1.1); } }
-@keyframes po-pulse { 0% { box-shadow: 0 0 0 0 __ACCENT_SOFT__; }
-  80%, 100% { box-shadow: 0 0 0 7px transparent; } }
-@media (prefers-reduced-motion: reduce) {
-  .po-hero *, .po-hero::before { animation: none !important; } }
-</style>
-"""
-
-
-def hero(eyebrow: str, title: str, subtitle: str, chips: Iterable[str] = ()) -> None:
-    """Page header: staggered word reveal, drifting dot grid, capability marquee."""
-    words = "".join(
-        f'<span class="po-w" style="animation-delay:{0.05 + 0.055 * i:.3f}s">'
-        f"{html.escape(word)}</span> "
-        for i, word in enumerate(title.split())
-    )
-    chip_list = list(chips)
-    chip_set = "".join(f'<span class="po-chip">{html.escape(c)}</span>' for c in chip_list)
-    marquee = (
-        f'<div class="po-marquee"><div class="po-track">'
-        f'<div class="po-set">{chip_set}</div><div class="po-set" aria-hidden="true">{chip_set}</div>'
-        f"</div></div>"
-        if chip_list else ""
-    )
-    st.html(
-        _fill(_HERO_CSS)
-        + '<section class="po-hero"><div class="po-grid"></div>'
-        + f'<div class="po-eyebrow"><span class="po-dot"></span>{html.escape(eyebrow)}</div>'
-        + f'<h1 class="po-title">{words}</h1>'
-        + f'<p class="po-sub">{html.escape(subtitle)}</p>'
-        + marquee
-        + "</section>"
-    )
 
 
 # ---------------------------------------------------------- metric strip
