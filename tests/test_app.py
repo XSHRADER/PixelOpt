@@ -46,6 +46,14 @@ class EmptyStates(unittest.TestCase):
                 self.assertFalse(app.exception, [e.value for e in app.exception])
                 self.assertEqual(len(app.get("file_uploader")), 1)
 
+    def test_header_has_no_ambient_motion(self):
+        for name, page in PAGES.items():
+            with self.subTest(page=name):
+                bodies = " ".join(e.proto.body for e in run_page(page).get("html"))
+                self.assertIn("po-title", bodies)
+                for removed in ("po-marquee", "po-grid", "po-glow", "po-rise"):
+                    self.assertNotIn(removed, bodies)
+
 
 class ReferenceDownload(unittest.TestCase):
     def test_png_bytes_is_lossless(self):

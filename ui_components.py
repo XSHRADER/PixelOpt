@@ -9,8 +9,8 @@ Where the motion lives matters. Streamlit redraws the page on every
 interaction, so smooth transitions cannot run *between* reruns in native
 elements. Anything that must animate from an old value to a new one -- the
 count-up metrics, the range meter, the comparison modes -- is a Components v2
-element that keeps its previous state across updates. The hero is static HTML
-whose CSS animations only need to play once on load.
+element that keeps its previous state across updates. The page header is
+static HTML and does not move.
 """
 
 from __future__ import annotations
@@ -19,11 +19,15 @@ import base64
 import html
 import io
 import math
-from typing import Dict, Iterable, Optional, Sequence
+import re
+from typing import TYPE_CHECKING, Dict, Iterable, Optional, Sequence, Tuple
 
 import numpy as np
 import streamlit as st
 from PIL import Image
+
+if TYPE_CHECKING:
+    from streamlit.delta_generator import DeltaGenerator
 
 PREVIEW_MAX_SIDE = 2400
 PREVIEW_QUALITY = 92
@@ -71,33 +75,17 @@ def thumbnail_url(raw: bytes, side: int = 88) -> Optional[str]:
 # ----------------------------------------------------------------- palette
 
 
-def _palette() -> Dict[str, str]:
-    """Static HTML cannot read Streamlit's theme variables, so pick by mode."""
-    try:
-        dark = st.context.theme.type != "light"
-    except Exception:
-        dark = True
-    if dark:
-        return {
-            "BG": "#08090a", "CARD": "rgba(255,255,255,0.025)",
-            "BORDER": "rgba(255,255,255,0.08)", "TEXT": "#f7f8f8",
-            "MUTED": "#8a8f98", "ACCENT": "#7b7fff",
-            "ACCENT_SOFT": "rgba(123,127,255,0.16)",
-            "ACCENT_FAINT": "rgba(123,127,255,0.07)", "DOT": "rgba(255,255,255,0.09)",
-            "HEADER": "rgba(8,9,10,0.72)",
-        }
-    return {
-        "BG": "#ffffff", "CARD": "rgba(8,9,10,0.025)",
-        "BORDER": "rgba(8,9,10,0.09)", "TEXT": "#0f1011",
-        "MUTED": "#62666d", "ACCENT": "#5b5fe8",
-        "ACCENT_SOFT": "rgba(91,95,232,0.14)",
-        "ACCENT_FAINT": "rgba(91,95,232,0.06)", "DOT": "rgba(8,9,10,0.09)",
-        "HEADER": "rgba(255,255,255,0.72)",
-    }
+# Static HTML (st.html) cannot read Streamlit's theme variables, so the few
+# colours it needs are repeated from .streamlit/config.toml. The theme has no
+# light variant, so there is one set.
+_PALETTE: Dict[str, str] = {
+    "BG": "#1f2023", "CARD": "#2a2b2f", "BORDER": "#3a3c41", "TEXT": "#e8e8ea",
+    "MUTED": "#9a9ca3", "ACCENT": "#5cc8b8", "ACCENT_SOFT": "rgba(92,200,184,0.35)",
+}
 
 
 def _fill(template: str) -> str:
-    for name, value in _palette().items():
+    for name, value in _PALETTE.items():
         template = template.replace(f"__{name}__", value)
     return template
 
@@ -106,50 +94,20 @@ def _fill(template: str) -> str:
 
 _APP_CSS = """
 <style>
-/* The user asked for this look explicitly, so a little CSS is warranted.
-   It targets only hooks that are stable: data-testids for the chrome, and
-   st-key-* classes on containers this app creates. */
-[data-testid="stAppViewContainer"] {
-  background:
-    radial-gradient(1100px 480px at 12% -8%, __ACCENT_FAINT__, transparent 62%),
-    __BG__;
-}
+/* Colour and type come from .streamlit/config.toml. This covers only what
+   the theme cannot express, through stable hooks: data-testids for the
+   chrome, and st-key-* classes on containers this app creates. */
 header[data-testid="stHeader"] {
-  background: __HEADER__ !important;
-  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  background: __BG__ !important;
   border-bottom: 1px solid __BORDER__;
 }
-[class*="st-key-po_card"] {
-  animation: po-card-in .55s cubic-bezier(.22,1,.36,1) both;
-}
-[class*="st-key-po_card_intro"]:nth-child(2) { animation-delay: .07s; }
-[class*="st-key-po_card_intro"]:nth-child(3) { animation-delay: .14s; }
-[class*="st-key-po_card"] > div {
-  transition: border-color .16s cubic-bezier(.25,.46,.45,.94),
-              background-color .16s cubic-bezier(.25,.46,.45,.94);
-}
+[class*="st-key-po_card"] > div { transition: border-color .16s ease; }
 [class*="st-key-po_card"]:hover > div { border-color: __ACCENT_SOFT__; }
-.stButton button, .stDownloadButton button {
-  transition: transform .16s cubic-bezier(.25,.46,.45,.94),
-              box-shadow .16s cubic-bezier(.25,.46,.45,.94),
-              background-color .16s ease, border-color .16s ease;
-}
-.stButton button:hover, .stDownloadButton button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 22px -10px __ACCENT__;
-}
-.stButton button:active, .stDownloadButton button:active { transform: translateY(0); }
-[data-testid="stFileUploaderDropzone"] {
-  transition: border-color .2s ease, background-color .2s ease, box-shadow .25s ease;
-}
-[data-testid="stFileUploaderDropzone"]:hover {
-  border-color: __ACCENT__;
-  box-shadow: 0 0 0 4px __ACCENT_FAINT__;
-}
-[data-testid="stTab"] { transition: color .16s ease; }
-@keyframes po-card-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: none; }
+[data-testid="stFileUploaderDropzone"] { transition: border-color .16s ease; }
+[data-testid="stFileUploaderDropzone"]:hover { border-color: __ACCENT__; }
+/* Figures line up in columns when they share a monospaced face. */
+[class*="st-key-po_numbers"] [data-testid="stTable"] td {
+  font-family: "JetBrains Mono", monospace; font-variant-numeric: tabular-nums;
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -160,6 +118,67 @@ header[data-testid="stHeader"] {
 
 def app_style() -> None:
     st.html(_fill(_APP_CSS))
+
+
+# ------------------------------------------------------------------ header
+
+_HEADER_CSS = """
+<style>
+.po-head { padding: 22px 0 8px; font-family: Inter, -apple-system, "Segoe UI", sans-serif; }
+.po-eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500;
+  color: __MUTED__; padding: 3px 10px 3px 8px; border: 1px solid __BORDER__; border-radius: 6px;
+  background: __CARD__; }
+.po-dot { width: 6px; height: 6px; border-radius: 50%; background: __ACCENT__; }
+.po-title { margin: 14px 0 8px; padding: 0; font-size: clamp(28px, 3.2vw, 40px); line-height: 1.1;
+  letter-spacing: -0.02em; font-weight: 600; color: __TEXT__; max-width: 24ch; }
+.po-sub { max-width: 66ch; margin: 0; font-size: 15px; line-height: 1.6; color: __MUTED__; }
+</style>
+"""
+
+
+def page_header(eyebrow: str, title: str, subtitle: str) -> None:
+    """The page introduction, shown only until something is uploaded."""
+    st.html(
+        _fill(_HEADER_CSS)
+        + '<section class="po-head">'
+        + f'<div class="po-eyebrow"><span class="po-dot"></span>{html.escape(eyebrow)}</div>'
+        + f'<h1 class="po-title">{html.escape(title)}</h1>'
+        + f'<p class="po-sub">{html.escape(subtitle)}</p>'
+        + "</section>"
+    )
+
+
+def intro_cards(cards: Sequence[Tuple[str, str, str, str]]) -> None:
+    """A row of bordered explainer cards, each (key, icon, title, body)."""
+    with st.container(horizontal=True, gap="medium"):
+        for key, icon, title, body in cards:
+            with st.container(border=True, key=f"po_card_intro_{key}"):
+                st.markdown(f"#### {icon} {title}")
+                st.caption(body)
+
+
+_MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|~<>$:])")
+
+
+def file_line(name: str, facts: str) -> None:
+    """One line naming what is loaded, in place of the page header."""
+    # File names are user input: escape them, or photo_1_final.jpg renders
+    # half in italics.
+    escaped = _MARKDOWN_SPECIAL.sub(lambda match: "\\" + match.group(1), name)
+    with st.container(horizontal=True, gap="small", vertical_alignment="center"):
+        st.markdown(f"**{escaped}**", width="content")
+        st.caption(facts, width="content")
+
+
+def workbench(key: str) -> Tuple["DeltaGenerator", "DeltaGenerator"]:
+    """Controls on the left, the result on the right.
+
+    The point is cause and effect side by side: change a setting and its
+    result updates next to it rather than a scroll away. Returns the bordered
+    control panel and the result column.
+    """
+    left, right = st.columns([1, 2.4], gap="medium")
+    return left.container(border=True, key=f"po_panel_{key}"), right
 
 
 # -------------------------------------------------------------------- hero

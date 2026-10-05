@@ -10,7 +10,6 @@ import streamlit as st
 from PIL import Image
 
 from app_shared import (
-    CHIPS,
     UPLOAD_TYPES,
     ceiling_kb,
     curve_points,
@@ -23,9 +22,9 @@ from app_shared import (
 from pixelopt.enhance import PRESETS, Enhancements, auto_enhancements, preset
 from pixelopt.image_features import has_transparency
 from pixelopt.pipeline import knee_point
-from ui_components import compare_view, hero, metric_strip, tone
+from ui_components import compare_view, page_header, metric_strip, tone
 
-hero(
+page_header(
     eyebrow="Measured, not guessed",
     title="Fit any image into a byte budget.",
     subtitle=(
@@ -33,7 +32,6 @@ hero(
         "under your size limit, cleans up noise when it pays for itself, and "
         "shows you exactly where quality was lost."
     ),
-    chips=CHIPS,
 )
 
 uploaded = st.file_uploader("Image", type=UPLOAD_TYPES, key="optimize_upload")

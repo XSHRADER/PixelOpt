@@ -7,9 +7,9 @@ from PIL import Image, ImageDraw
 
 from app_shared import UPLOAD_TYPES, form_view, run_form
 from pixelopt.forms import FORM_PRESETS, FormSpec
-from ui_components import compare_view, hero, metric_strip, range_meter, tone
+from ui_components import compare_view, page_header, metric_strip, range_meter, tone
 
-hero(
+page_header(
     eyebrow="Form photo mode",
     title="Exact pixels. Exact kilobytes.",
     subtitle=(
@@ -17,8 +17,6 @@ hero(
         "Every file passes whether the portal counts a kilobyte as 1000 or 1024 "
         "bytes, and the crop follows the face or the detail rather than the centre."
     ),
-    chips=("Exact dimensions", "Minimum and maximum size", "Both KB readings",
-           "Face-aware crop", "Baseline JPEG", "DPI written in", "Honest padding"),
 )
 
 uploaded = st.file_uploader("Photo or signature", type=UPLOAD_TYPES, key="form_upload")

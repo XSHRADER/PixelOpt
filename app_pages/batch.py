@@ -11,9 +11,9 @@ from app_shared import UPLOAD_TYPES, fingerprint, form_job, target_job
 from pixelopt.batch import build_zip, report_csv, run_batch
 from pixelopt.enhance import PRESETS
 from pixelopt.forms import FORM_PRESETS
-from ui_components import hero, metric_strip, thumbnail_url, tone
+from ui_components import page_header, metric_strip, thumbnail_url, tone
 
-hero(
+page_header(
     eyebrow="Batch mode",
     title="Many images. One download.",
     subtitle=(
@@ -21,8 +21,6 @@ hero(
         "broken upload never stops the run, and the ZIP holds exactly the bytes "
         "the report describes."
     ),
-    chips=("Target size or form photo", "Per-image auto enhancement", "Damage per image",
-           "Failures isolated", "Unique file names", "CSV report", "ZIP export"),
 )
 
 files = st.file_uploader("Images", type=UPLOAD_TYPES, accept_multiple_files=True,
