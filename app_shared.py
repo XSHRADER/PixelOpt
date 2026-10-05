@@ -19,6 +19,7 @@ from typing import Callable, Dict, Optional
 import cv2
 import numpy as np
 import streamlit as st
+from PIL import Image
 
 from pixelopt.adaptive_compressor import AdaptiveImageCompressor
 from pixelopt.analysis import damage_map, damage_summary, heatmap_rgba
@@ -44,6 +45,18 @@ CHIPS = (
 
 def fingerprint(raw: bytes) -> str:
     return hashlib.sha1(raw).hexdigest()
+
+
+def png_bytes(picture: Image.Image) -> bytes:
+    """Lossless PNG of an image, for the reference download.
+
+    Hand it to st.download_button inside a lambda: the button then runs it
+    only when clicked. Encoding a 12 MP PNG on every rerun used to cost
+    seconds whether or not anyone wanted the file.
+    """
+    buffer = io.BytesIO()
+    picture.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
