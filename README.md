@@ -163,6 +163,9 @@ and matplotlib are all gone, along with a 3 MB committed model file.
   kilobyte readings, and a crop that follows a face or the detail.
 - Batch mode in the app, with failures isolated and a ZIP plus CSV report.
 - A full-resolution damage heatmap and damaged-area measurement.
+- An Objects page that names what is in a photo, outlines the thing you pick and
+  removes it, with a classical fill beside a locally generated prediction of
+  what was behind it.
 - A Streamlit workbench — controls beside the result, on a mid-gray theme so
   the surround does not change how compressed images look — plus a batch CLI
   and a reproducible benchmark.
@@ -256,6 +259,92 @@ artefacts away before SSIM can see them: on a faded scan the damaged share read
 86% at full resolution, 52% after a barely visible downscale, and 0.4% at
 400k pixels, all for the same file.
 
+## Objects page
+
+Upload a photo and PixelOpt names what is in it, outlines the thing you pick,
+and fills the gap it leaves in two ways. Everything runs on your own computer;
+nothing is sent anywhere.
+
+| step | model | what it does |
+|---|---|---|
+| name | Florence-2 | describes the scene and lists objects by name; also finds a name you type |
+| outline | SAM 2.1 | turns the chosen object's box into an exact mask |
+| suggest | a vision model served by Ollama, if you run one | proposes what the object is attached to or hiding |
+| fill, classical | OpenCV (Telea) | carries the surrounding colours inwards |
+| fill, generated | SDXL inpainting, or SD 1.5 | paints what the description says is there |
+
+**The generated fill is a prediction, not a recovery.** Remove a tree's leaves
+and it paints a bare tree joined to the real trunk, but the camera never saw
+those branches, and asking again gives a different, equally plausible set. The
+page says so next to every generated result.
+
+Only the hole changes. A diffusion model repaints its whole canvas slightly,
+so its answer is composited back through the mask, and the tests check that
+every pixel outside it is identical to the input.
+
+### What it costs, measured
+
+On an 8 GB RTX 4060 laptop GPU:
+
+| step | time | peak GPU memory |
+|---|---|---|
+| name the scene (Florence-2) | 3.4 s caption, under 1 s per detection | 1.8 GB |
+| outline (SAM 2.1) | 1.0 s | 1.3 GB |
+| suggest (qwen2.5vl:7b through Ollama) | 10-30 s, mostly loading the model | about 6 GB, released after each answer |
+| generated fill, SDXL | 21 s, 38 s the first time | 5.4 GB |
+| generated fill, SD 1.5 | 6 s, 10 s the first time | 2.5 GB |
+| classical fill | 0.6 s | none |
+
+The models do not fit on the card together, so only one large model is on the
+GPU at a time: Florence-2 and SAM 2.1 move to main memory before a fill model
+runs, and Ollama is asked to unload after each answer.
+
+### How good is it, measured
+
+A removal on a real photo cannot be scored, because nobody knows what was
+behind the object. `python benchmark_vision.py` runs the test the other way
+round: it hides a region whose true pixels are known, fills it both ways, and
+scores each fill against the truth, inside the hole only.
+
+| image | hole | classical PSNR / SSIM | generated PSNR / SSIM |
+|---|---|---|---|
+| astronaut | 3.3% | 16.04 / 0.396 | 16.26 / 0.460 |
+| astronaut | 2.1% | 20.88 / 0.831 | **30.60** / 0.863 |
+| coffee | 2.2% | 15.86 / 0.472 | 15.37 / 0.466 |
+| coffee | 1.4% | 18.13 / 0.607 | 21.13 / 0.775 |
+| chelsea | 2.3% | 23.29 / 0.413 | 21.35 / 0.332 |
+| chelsea | 1.4% | 21.44 / 0.439 | 19.64 / 0.339 |
+| rocket | 2.3% | 26.33 / 0.835 | 29.93 / 0.927 |
+| rocket | 1.4% | **42.43** / 0.982 | 9.72 / 0.429 |
+
+The generated fill wins four holes and loses four. Two things explain that,
+and both are worth knowing before trusting either number:
+
+- **It invents.** The last row is a patch of empty sky. The description
+  mentioned a rocket, so the model painted one there; the classical fill
+  painted sky and was nearly perfect. A generative model fills a hole with
+  what the words say, whether or not it was there.
+- **Pixel metrics reward blur.** PSNR and SSIM measure closeness on average,
+  and a smooth smear is closer on average than a sharp, plausible, different
+  texture. On the cat's fur the classical fill scores higher and looks worse.
+  This is the perception-distortion trade-off; no learned perceptual metric is
+  included, so judge fur and foliage by eye.
+
+### Setting it up
+
+The page needs libraries the rest of PixelOpt does not, so they are a separate
+install. Install the GPU build of PyTorch first, or pip fetches the CPU one:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+pip install -r requirements-vision.txt
+```
+
+The first use downloads about 10 GB of model weights. Without these libraries
+the page shows the commands above and the rest of the app is unaffected.
+Without a CUDA GPU, naming and outlining run on the CPU and only the classical
+fill is offered. Without Ollama, you type the description yourself.
+
 ## Project layout
 
 - `pixelopt/adaptive_compressor.py` — the search and the encoding pipeline.
@@ -266,13 +355,16 @@ artefacts away before SSIM can see them: on a faded scan the damaged share read
 - `pixelopt/batch.py` — running a job over many files, ZIP and CSV export.
 - `pixelopt/image_features.py` — loading, content statistics, quality metrics.
 - `pixelopt/cli.py` — command-line entry point.
+- `pixelopt/vision/` — the Objects page's engine: naming, outlines, the two
+  fills, the local-model client, model loading and scoring.
 - `app.py` — Streamlit entry point: theme, styling, top navigation.
-- `app_pages/` — the Optimize, Form photo and Batch pages.
+- `app_pages/` — the Optimize, Form photo, Batch and Objects pages.
 - `app_shared.py` — cached Streamlit helpers shared by the pages.
 - `ui_components.py` — page header, intro cards, workbench layout, count-up
   metrics, range meter and the slide / flicker / heatmap comparison viewer
   (Components v2).
-- `benchmark.py` — reproducible measurements behind the table above.
+- `benchmark.py` — reproducible measurements behind the compression table.
+- `benchmark_vision.py` — the hide-and-restore measurement of the two fills.
 - `tests/` — unit tests for the engine and the launcher, and a smoke test that
   every page renders.
 
