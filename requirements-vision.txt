@@ -9,9 +9,10 @@
 #   pip install -r requirements-vision.txt
 #
 # The first use of the page then downloads about 10 GB of model weights.
+# Tested with torch 2.14, transformers 5.19 and diffusers 0.41.
 torch>=2.6
 torchvision>=0.21
-transformers>=5.0,<6.0
-diffusers>=0.36,<1.0
+transformers>=5.19,<6.0
+diffusers>=0.41,<1.0
 accelerate>=1.0
 safetensors>=0.4

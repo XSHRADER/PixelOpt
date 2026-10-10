@@ -231,11 +231,28 @@ def vision_mask(raw: bytes, box: tuple):
     return vision_hub().mask_for(_vision_picture(raw), box)
 
 
+class _NoSuggestion(Exception):
+    """The local model had nothing usable to say this time."""
+
+
 @st.cache_data(show_spinner=False, max_entries=32)
-def vision_suggestion(raw: bytes, name: str, box: tuple, model: str) -> str:
+def _vision_suggestion(raw: bytes, name: str, box: tuple, model: str) -> str:
     # Ollama needs the GPU memory the detector and segmenter are holding.
     vision_hub().rest()
-    return reason.suggest_fill(_vision_picture(raw), name, model, box=box) or ""
+    phrase = reason.suggest_fill(_vision_picture(raw), name, model, box=box)
+    if not phrase:
+        # Raising keeps the failure out of the cache: the model may simply not
+        # be up yet, and remembering its silence would make asking again futile.
+        raise _NoSuggestion
+    return phrase
+
+
+def vision_suggestion(raw: bytes, name: str, box: tuple, model: str) -> str:
+    """What a local model thinks is behind the object, or "" when it cannot say."""
+    try:
+        return _vision_suggestion(raw, name, box, model)
+    except _NoSuggestion:
+        return ""
 
 
 @st.cache_data(show_spinner=False, max_entries=16)

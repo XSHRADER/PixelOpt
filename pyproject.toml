@@ -26,8 +26,8 @@ app = [
 vision = [
     "torch>=2.6",
     "torchvision>=0.21",
-    "transformers>=5.0,<6.0",
-    "diffusers>=0.36,<1.0",
+    "transformers>=5.19,<6.0",
+    "diffusers>=0.41,<1.0",
     "accelerate>=1.0",
     "safetensors>=0.4",
 ]
