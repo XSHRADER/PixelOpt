@@ -1,0 +1,587 @@
+"""Tests for the Objects page's engine. No model, GPU or vision library is needed.
+
+Everything here exercises the code around the models: parsing what they
+return, shaping masks, cropping, compositing, scoring, and talking to Ollama
+(against a stub server). The models themselves are checked on a machine with
+a GPU -- see benchmark_vision.py.
+
+    python tests/test_vision.py -v
+"""
+
+from __future__ import annotations
+
+import base64
+import http.server
+import io
+import json
+import math
+import subprocess
+import sys
+import threading
+import unittest
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from pixelopt.vision import detect, draw, evaluate, inpaint, models, reason, segment  # noqa: E402
+from pixelopt.vision.types import Found  # noqa: E402
+
+SIZE = (640, 480)  # width, height
+
+
+def scene(height: int = 240, width: int = 320, seed: int = 5) -> np.ndarray:
+    """A smooth colour gradient with a little texture: easy to predict from its edges."""
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
+    base = np.stack([x / width * 200 + 30, y / height * 180 + 40, (x + y) / (width + height) * 160 + 50], -1)
+    return np.clip(base + rng.normal(0, 2, base.shape), 0, 255).astype(np.uint8)
+
+
+def disc(height: int = 240, width: int = 320, centre=(160, 120), radius: int = 30) -> np.ndarray:
+    y, x = np.mgrid[0:height, 0:width]
+    return (x - centre[0]) ** 2 + (y - centre[1]) ** 2 <= radius ** 2
+
+
+class DetectionParsing(unittest.TestCase):
+    def test_object_detection_answer(self):
+        parsed = {"<OD>": {"bboxes": [[10.2, 20.7, 110.0, 220.4]], "labels": ["Car"]}}
+        self.assertEqual(detect.parse_detections(parsed, "<OD>", SIZE),
+                         [Found("car", (10, 21, 110, 220))])
+
+    def test_open_vocabulary_answer_uses_its_own_label_key(self):
+        parsed = {"<OPEN_VOCABULARY_DETECTION>": {
+            "bboxes": [[0, 0, 100, 100]], "bboxes_labels": ["leaves"],
+            "polygons": [], "polygons_labels": []}}
+        found = detect.parse_detections(parsed, "<OPEN_VOCABULARY_DETECTION>", SIZE)
+        self.assertEqual(found, [Found("leaves", (0, 0, 100, 100))])
+
+    def test_outlines_become_boxes(self):
+        parsed = {"<OPEN_VOCABULARY_DETECTION>": {
+            "bboxes": [], "bboxes_labels": [],
+            "polygons": [[[50, 60, 150, 60, 150, 200, 50, 200]]], "polygons_labels": ["sign"]}}
+        found = detect.parse_detections(parsed, "<OPEN_VOCABULARY_DETECTION>", SIZE)
+        self.assertEqual(found, [Found("sign", (50, 60, 150, 200))])
+
+    def test_boxes_are_clamped_to_the_image(self):
+        parsed = {"<OD>": {"bboxes": [[-30, -10, 200, 900]], "labels": ["pole"]}}
+        self.assertEqual(detect.parse_detections(parsed, "<OD>", SIZE)[0].box, (0, 0, 200, 480))
+
+    def test_useless_boxes_are_dropped(self):
+        parsed = {"<OD>": {
+            "bboxes": [[5, 5, 8, 300],            # a sliver
+                       [0, 0, 640, 480],          # the whole frame
+                       [10, 10, 200, 200],        # no usable name
+                       [10, 10, 200, 200],        # a sentence, not a name
+                       ["a", "b", "c", "d"],      # not numbers
+                       [1, 2]],                   # not a box
+            "labels": ["wire", "field", "  ", "x" * 60, "cat", "dog"]}}
+        self.assertEqual(detect.parse_detections(parsed, "<OD>", SIZE), [])
+
+    def test_a_missing_label_takes_the_fallback_name(self):
+        parsed = {"<OPEN_VOCABULARY_DETECTION>": {"bboxes": [[10, 10, 90, 90]], "bboxes_labels": []}}
+        found = detect.parse_detections(parsed, "<OPEN_VOCABULARY_DETECTION>", SIZE,
+                                        fallback_name="Leaves")
+        self.assertEqual(found, [Found("leaves", (10, 10, 90, 90))])
+
+    def test_an_answer_for_another_task_or_of_the_wrong_shape_is_empty(self):
+        self.assertEqual(detect.parse_detections({"<OD>": "no boxes here"}, "<OD>", SIZE), [])
+        self.assertEqual(detect.parse_detections({}, "<OD>", SIZE), [])
+        self.assertEqual(detect.parse_detections(None, "<OD>", SIZE), [])
+
+    def test_names_are_tidied(self):
+        self.assertEqual(detect.clean_name("  The  Oak   tree. "), "oak tree")
+        self.assertEqual(detect.clean_name("car</s>"), "car")
+        self.assertEqual(detect.clean_name("An apple"), "apple")
+
+
+class MergeAndNumber(unittest.TestCase):
+    def test_overlapping_boxes_are_one_thing_and_the_first_name_wins(self):
+        first = [Found("tree", (100, 100, 300, 400))]
+        second = [Found("large oak tree", (104, 98, 298, 396)), Found("bench", (400, 300, 500, 380))]
+        self.assertEqual([item.name for item in detect.merge([first, second])], ["tree", "bench"])
+
+    def test_a_part_is_kept_beside_its_whole(self):
+        # Measured on a real photo: the leaves fill 78% of the tree's box.
+        # They are different things, and the leaves are the one to remove.
+        found = [Found("tree", (98, 194, 976, 902)), Found("leaves", (102, 197, 974, 754))]
+        self.assertEqual([item.name for item in detect.merge([found])], ["tree", "leaves"])
+
+    def test_one_name_needs_less_overlap_to_count_as_a_repeat(self):
+        found = [Found("leaves", (102, 197, 974, 754)), Found("leaves", (95, 194, 980, 776))]
+        self.assertEqual(len(detect.merge([found])), 1)
+
+    def test_caption_names_beat_the_detectors_guess(self):
+        # The same real photo: the fixed-vocabulary detector called the tree a houseplant.
+        class Asked(detect.Detector):
+            answers = {
+                detect.CAPTION: {detect.CAPTION: "A large tree in a field."},
+                detect.DETECT: {detect.DETECT: {"bboxes": [[92, 190, 981, 911]], "labels": ["houseplant"]}},
+                detect.GROUND: {detect.GROUND: {"bboxes": [[98, 194, 976, 902]], "labels": ["A large tree"]}},
+            }
+
+            def _ask(self, image, task, text=""):
+                return self.answers[task]
+
+        scene_found = Asked(None, None).describe(Image.new("RGB", (1024, 1024)))
+        self.assertEqual([item.name for item in scene_found.objects], ["large tree"])
+
+    def test_a_search_hit_on_something_already_listed_is_recognised(self):
+        # Measured: asked for a nonsense word, the detector returned the tree's
+        # box. A search must not rename what is already in the list.
+        listed = [Found("tree", (98, 194, 976, 902)), Found("trunk", (480, 603, 640, 896))]
+        hit = Found("qzxv", (95, 193, 979, 907))
+        self.assertEqual(detect.already_listed(hit, listed), listed[0])
+        self.assertIsNone(detect.already_listed(Found("bird", (10, 10, 60, 50)), listed))
+        self.assertIsNone(detect.already_listed(hit, []))
+
+    def test_separate_things_with_one_name_are_all_kept(self):
+        people = [Found("person", (0, 0, 50, 100)), Found("person", (300, 0, 350, 100))]
+        self.assertEqual(len(detect.merge([people])), 2)
+
+    def test_largest_comes_first(self):
+        found = [Found("cup", (0, 0, 20, 20)), Found("table", (0, 100, 400, 300))]
+        self.assertEqual([item.name for item in detect.merge([found])], ["table", "cup"])
+
+    def test_nothing_in_nothing_out(self):
+        self.assertEqual(detect.merge([]), [])
+        self.assertEqual(detect.merge([[], []]), [])
+        self.assertEqual(detect.number([]), [])
+
+    def test_repeated_names_are_numbered(self):
+        found = [Found("person", (0, 0, 9, 9)), Found("dog", (0, 0, 9, 9)), Found("person", (9, 9, 20, 20))]
+        self.assertEqual([item.name for item in detect.number(found)], ["person", "dog", "person 2"])
+
+    def test_iou(self):
+        self.assertEqual(detect.iou((0, 0, 10, 10), (0, 0, 10, 10)), 1.0)
+        self.assertEqual(detect.iou((0, 0, 10, 10), (20, 20, 30, 30)), 0.0)
+        self.assertAlmostEqual(detect.iou((0, 0, 10, 10), (5, 0, 15, 10)), 1 / 3)
+
+
+class Masks(unittest.TestCase):
+    def test_growing_widens_and_keeps_the_original(self):
+        mask = disc(radius=20)
+        grown = segment.grow(mask, 6)
+        self.assertTrue(grown[mask].all())
+        self.assertGreater(grown.sum(), mask.sum())
+        # About six pixels further out in every direction.
+        self.assertTrue(grown[120, 160 + 25])
+        self.assertFalse(grown[120, 160 + 29])
+
+    def test_growing_by_nothing_changes_nothing(self):
+        mask = disc()
+        np.testing.assert_array_equal(segment.grow(mask, 0), mask)
+        empty = np.zeros((20, 20), dtype=bool)
+        np.testing.assert_array_equal(segment.grow(empty, 5), empty)
+
+    def test_feather_is_zero_outside_and_one_deep_inside(self):
+        mask = disc(radius=30)
+        alpha = segment.inner_feather(mask, 8)
+        self.assertEqual(float(alpha[~mask].max()), 0.0)
+        self.assertEqual(float(alpha[120, 160]), 1.0)
+        # It eases: a pixel near the edge weighs less than one further in.
+        self.assertLess(alpha[120, 160 + 28], alpha[120, 160 + 24])
+
+    def test_feather_of_zero_is_the_hard_mask(self):
+        mask = disc()
+        np.testing.assert_array_equal(segment.inner_feather(mask, 0), mask.astype(np.float32))
+
+    def test_bounding_box_and_share(self):
+        mask = np.zeros((100, 200), dtype=bool)
+        mask[10:30, 50:90] = True
+        self.assertEqual(segment.bounding_box(mask), (50, 10, 90, 30))
+        self.assertAlmostEqual(segment.share(mask), 800 / 20000)
+        self.assertIsNone(segment.bounding_box(np.zeros((5, 5), dtype=bool)))
+
+    def test_box_mask_is_the_box(self):
+        mask = segment.box_mask((100, 200, 3), (50, 10, 90, 30))
+        self.assertEqual(segment.bounding_box(mask), (50, 10, 90, 30))
+        self.assertEqual(int(mask.sum()), 800)
+
+
+class ClassicalFill(unittest.TestCase):
+    def test_only_the_hole_changes(self):
+        image, mask = scene(), disc()
+        damaged = image.copy()
+        damaged[mask] = 0
+        filled = inpaint.classical(damaged, mask)
+        np.testing.assert_array_equal(filled[~mask], damaged[~mask])
+        self.assertFalse(np.array_equal(filled[mask], damaged[mask]))
+
+    def test_a_smooth_scene_is_restored_from_its_surroundings(self):
+        image, mask = scene(), disc()
+        damaged = image.copy()
+        damaged[mask] = 0
+        filled = inpaint.classical(damaged, mask)
+        hole_error = np.abs(damaged[mask].astype(float) - image[mask]).mean()
+        fill_error = np.abs(filled[mask].astype(float) - image[mask]).mean()
+        self.assertLess(fill_error, hole_error / 10)
+
+    def test_an_empty_mask_returns_an_untouched_copy(self):
+        image = scene()
+        filled = inpaint.classical(image, np.zeros(image.shape[:2], dtype=bool))
+        np.testing.assert_array_equal(filled, image)
+        self.assertIsNot(filled, image)
+
+
+class CropWindow(unittest.TestCase):
+    def assert_contains(self, window, mask):
+        x0, y0, x1, y1 = segment.bounding_box(mask)
+        self.assertLessEqual(window[0], x0)
+        self.assertLessEqual(window[1], y0)
+        self.assertGreaterEqual(window[2], x1)
+        self.assertGreaterEqual(window[3], y1)
+
+    def test_window_holds_the_mask_with_context_and_stays_in_the_image(self):
+        mask = disc(600, 800, centre=(700, 80), radius=60)
+        window = inpaint.crop_box(mask)
+        self.assert_contains(window, mask)
+        self.assertGreaterEqual(window[0], 0)
+        self.assertLessEqual(window[2], 800)
+        self.assertLessEqual(window[3], 600)
+        self.assertEqual(window[2] - window[0], window[3] - window[1])  # square
+        self.assertGreater(window[2] - window[0], 120)  # more than the mask alone
+
+    def test_a_small_mask_still_gets_the_minimum_window(self):
+        mask = disc(600, 800, centre=(400, 300), radius=10)
+        window = inpaint.crop_box(mask)
+        self.assertEqual(window[2] - window[0], inpaint.CROP_MINIMUM)
+
+    def test_an_image_smaller_than_the_minimum_is_used_whole(self):
+        mask = disc(40, 50, centre=(25, 20), radius=6)
+        self.assertEqual(inpaint.crop_box(mask), (0, 0, 50, 40))
+
+    def test_a_mask_covering_nearly_everything_gets_the_whole_image(self):
+        mask = np.ones((300, 400), dtype=bool)
+        mask[:2] = False
+        self.assertEqual(inpaint.crop_box(mask), (0, 0, 400, 300))
+
+    def test_an_empty_mask_gets_the_whole_image(self):
+        self.assertEqual(inpaint.crop_box(np.zeros((30, 40), dtype=bool)), (0, 0, 40, 30))
+
+    def test_work_size_is_a_multiple_of_eight_at_the_target(self):
+        self.assertEqual(inpaint.work_size(400, 400, 1024), (1024, 1024))
+        wide, tall = inpaint.work_size(451, 300, 1024)
+        self.assertEqual(wide, 1024)
+        self.assertEqual(tall % 8, 0)
+        self.assertEqual(inpaint.work_size(40, 4, 512), (512, 64))  # never below 64
+
+
+class GenerativeFill(unittest.TestCase):
+    """`generative` with a stand-in for the diffusion model."""
+
+    RED = (255, 0, 0)
+
+    def setUp(self):
+        self.calls = []
+
+    def painter(self, picture, hole, prompt, seed):
+        self.calls.append({"size": picture.size, "hole": hole, "prompt": prompt, "seed": seed})
+        # Like an inpainting model: paint the hole, hand back the rest as given.
+        painted = np.asarray(picture).copy()
+        painted[np.asarray(hole) > 127] = self.RED
+        return Image.fromarray(painted)
+
+    def test_nothing_outside_the_mask_changes_even_when_the_model_repaints_everything(self):
+        image, mask = scene(), disc()
+
+        def careless(picture, hole, prompt, seed):
+            # A real diffusion model shifts the whole canvas a little.
+            return Image.fromarray(255 - np.asarray(picture))
+
+        filled = inpaint.generative(image, mask, "anything", careless, feather=4)
+        np.testing.assert_array_equal(filled[~mask], image[~mask])
+
+    def test_a_tone_shift_over_the_whole_picture_is_undone_in_the_hole(self):
+        # Measured on SDXL: it brightened even the pixels it was told to keep,
+        # by about (+14, +11, +9), which left the hole's outline visible.
+        image, mask = scene(), disc()
+        drift = np.array([14, 11, 9])
+
+        def brightening(picture, hole, prompt, seed):
+            return Image.fromarray(np.clip(np.asarray(picture).astype(int) + drift, 0, 255).astype(np.uint8))
+
+        filled = inpaint.generative(image, mask, "x", brightening, target=512, feather=0)
+        plain = inpaint.generative(image, mask, "x", lambda picture, *_: picture, target=512, feather=0)
+        error = np.abs(filled[mask].astype(int) - plain[mask].astype(int)).mean()
+        self.assertLess(error, 2.0)
+
+    def test_harmonise_removes_the_shift_and_keeps_what_was_painted(self):
+        image, mask = scene(), disc()
+        wanted = image.copy()
+        wanted[110:130, 140:180] = (40, 30, 20)          # a dark branch across the hole
+        painted = np.clip(wanted.astype(int) + (14, 11, 9), 0, 255).astype(np.uint8)
+        fixed = inpaint.harmonise(image, painted, mask)
+        self.assertLess(np.abs(fixed[mask].astype(int) - wanted[mask].astype(int)).mean(), 2.0)
+        self.assertGreater(np.abs(painted[mask].astype(int) - wanted[mask].astype(int)).mean(), 8.0)
+
+    def test_harmonise_leaves_a_faithful_painting_alone(self):
+        image, mask = scene(), disc()
+        painted = image.copy()
+        painted[mask] = self.RED
+        np.testing.assert_array_equal(inpaint.harmonise(image, painted, mask), painted)
+
+    def test_harmonise_with_nothing_to_compare_against_changes_nothing(self):
+        image = scene()
+        painted = np.full_like(image, 90)
+        everything = np.ones(image.shape[:2], dtype=bool)
+        np.testing.assert_array_equal(inpaint.harmonise(image, painted, everything), painted)
+        nothing = np.zeros(image.shape[:2], dtype=bool)
+        np.testing.assert_array_equal(inpaint.harmonise(image, painted, nothing), painted)
+
+    def test_the_inside_is_what_the_model_painted(self):
+        image, mask = scene(), disc()
+        inside = disc(radius=26)  # clear of the rim, where resizing blends the two sides
+        for feather in (0, 3):
+            with self.subTest(feather=feather):
+                filled = inpaint.generative(image, mask, "anything", self.painter, feather=feather)
+                # Within a couple of levels: resizing the window up and back is
+                # not lossless, and the tone correction sees that as a tiny shift.
+                self.assertLessEqual(np.abs(filled[inside].astype(int) - self.RED).max(), 2)
+
+    def test_the_model_gets_a_canvas_it_can_work_on_and_the_prompt_and_seed(self):
+        image, mask = scene(), disc()
+        inpaint.generative(image, mask, "bare branches", self.painter, seed=7, target=512)
+        call = self.calls[0]
+        self.assertEqual(max(call["size"]), 512)
+        self.assertEqual((call["size"][0] % 8, call["size"][1] % 8), (0, 0))
+        self.assertEqual(call["hole"].size, call["size"])
+        self.assertEqual(call["hole"].mode, "L")
+        self.assertEqual(sorted(set(np.asarray(call["hole"]).ravel().tolist())), [0, 255])
+        self.assertEqual((call["prompt"], call["seed"]), ("bare branches", 7))
+
+    def test_the_model_never_sees_the_thing_being_removed(self):
+        image, mask = scene(), disc()
+        image[mask] = (0, 255, 0)  # a vivid green object on a scene with no such green
+
+        def painter(picture, hole, prompt, seed):
+            self.calls.append(np.asarray(picture))
+            return picture
+
+        inpaint.generative(image, mask, "x", painter, target=512)
+        seen = self.calls[0].astype(int)
+        vivid_green = (seen[..., 1] > 240) & (seen[..., 0] < 40) & (seen[..., 2] < 40)
+        self.assertEqual(int(vivid_green.sum()), 0)
+
+    def test_an_empty_mask_does_not_call_the_model(self):
+        image = scene()
+        filled = inpaint.generative(image, np.zeros(image.shape[:2], dtype=bool), "x", self.painter)
+        np.testing.assert_array_equal(filled, image)
+        self.assertEqual(self.calls, [])
+
+    def test_a_tiny_image_works(self):
+        image, mask = scene(40, 50), disc(40, 50, centre=(25, 20), radius=6)
+        filled = inpaint.generative(image, mask, "x", self.painter, target=512, feather=2)
+        self.assertEqual(filled.shape, image.shape)
+        np.testing.assert_array_equal(filled[~mask], image[~mask])
+
+    def test_a_mask_covering_nearly_everything_works(self):
+        image = scene()
+        mask = np.ones(image.shape[:2], dtype=bool)
+        mask[:3] = False
+        filled = inpaint.generative(image, mask, "x", self.painter, feather=0)
+        np.testing.assert_array_equal(filled[:3], image[:3])
+        self.assertTrue((filled[40:] == self.RED).all())
+
+    def test_composite_alone_keeps_the_outside_exact(self):
+        image, mask = scene(), disc()
+        painted = np.full_like(image, 200)
+        out = inpaint.composite(image, painted, mask, feather=10)
+        np.testing.assert_array_equal(out[~mask], image[~mask])
+        self.assertEqual(out.dtype, np.uint8)
+
+
+class _Ollama(http.server.BaseHTTPRequestHandler):
+    """Just enough of Ollama's HTTP API to test the client against."""
+
+    reply = "bare branches against a blue sky"
+    status = 200
+    requests: list = []
+
+    def _send(self, body: dict) -> None:
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(type(self).status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802 - http.server naming
+        self._send({"models": [{"name": "phi4:14b"}, {"name": "llava:7b"}, {"name": "qwen2.5vl:7b"}]})
+
+    def do_POST(self):  # noqa: N802 - http.server naming
+        length = int(self.headers.get("Content-Length", "0"))
+        type(self).requests.append(json.loads(self.rfile.read(length)))
+        self._send({"response": type(self).reply})
+
+    def log_message(self, *args):  # keep test output clean
+        pass
+
+
+class LocalModel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Ollama)
+        cls.url = f"http://127.0.0.1:{cls.server.server_address[1]}"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        _Ollama.reply = "bare branches against a blue sky"
+        _Ollama.status = 200
+        _Ollama.requests = []
+        self.image = Image.fromarray(scene(900, 1200))
+
+    def test_models_are_listed(self):
+        self.assertEqual(reason.models(self.url), ["phi4:14b", "llava:7b", "qwen2.5vl:7b"])
+
+    def test_no_server_means_no_models_not_an_error(self):
+        self.assertEqual(reason.models("http://127.0.0.1:9", timeout=0.3), [])
+
+    def test_the_best_image_reading_model_is_picked(self):
+        self.assertEqual(reason.pick_vision_model(["phi4:14b", "llava:7b", "qwen2.5vl:7b"]), "qwen2.5vl:7b")
+        self.assertEqual(reason.pick_vision_model(["phi4:14b", "bakllava:7b"]), "bakllava:7b")
+        self.assertIsNone(reason.pick_vision_model(["phi4:14b", "codellama:7b"]))
+        self.assertIsNone(reason.pick_vision_model([]))
+
+    def test_a_suggestion_comes_back_tidy(self):
+        _Ollama.reply = '  "Bare branches against a blue sky."\n\nBecause the leaves hide them.'
+        phrase = reason.suggest_fill(self.image, "leaves", "qwen2.5vl:7b", url=self.url)
+        self.assertEqual(phrase, "Bare branches against a blue sky")
+
+    def test_the_request_frees_the_gpu_and_carries_one_small_image(self):
+        reason.suggest_fill(self.image, "person 2", "qwen2.5vl:7b", box=(10, 10, 200, 300), url=self.url)
+        sent = _Ollama.requests[0]
+        self.assertEqual(sent["model"], "qwen2.5vl:7b")
+        self.assertEqual(sent["keep_alive"], 0)
+        self.assertIs(sent["stream"], False)
+        self.assertEqual(len(sent["images"]), 1)
+        picture = Image.open(io.BytesIO(base64.b64decode(sent["images"][0])))
+        self.assertLessEqual(max(picture.size), reason.MAX_SIDE)
+        # The counter is ours, not part of the thing's name; the box is mentioned.
+        self.assertIn("as if the person had never been there", sent["prompt"])
+        self.assertNotIn("person 2", sent["prompt"])
+        self.assertIn("outlined in red", sent["prompt"])
+
+    def test_without_a_box_the_prompt_does_not_mention_an_outline(self):
+        reason.suggest_fill(self.image, "leaves", "qwen2.5vl:7b", url=self.url)
+        self.assertNotIn("outlined in red", _Ollama.requests[0]["prompt"])
+        self.assertIn("as if the leaves had never been there", _Ollama.requests[0]["prompt"])
+
+    def test_an_unusable_reply_is_none(self):
+        for reply in ("", "   \n  ", "<think>hmm</think>"):
+            with self.subTest(reply=reply):
+                _Ollama.reply = reply
+                self.assertIsNone(reason.suggest_fill(self.image, "leaves", "m", url=self.url))
+
+    def test_a_server_error_or_no_server_is_none(self):
+        _Ollama.status = 500
+        self.assertIsNone(reason.suggest_fill(self.image, "leaves", "m", url=self.url))
+        self.assertIsNone(reason.suggest_fill(self.image, "leaves", "m",
+                                              url="http://127.0.0.1:9", timeout=0.3))
+
+    def test_replies_are_cleaned(self):
+        self.assertEqual(reason.clean_phrase("<think>long reasoning</think>\nA brick wall."), "A brick wall")
+        self.assertEqual(reason.clean_phrase("**grass**"), "grass")
+        self.assertEqual(len(reason.clean_phrase("word " * 100)), 119)
+
+
+class Scoring(unittest.TestCase):
+    def test_a_perfect_fill(self):
+        image, mask = scene(), disc()
+        result = evaluate.score(image, image.copy(), mask)
+        self.assertEqual(result["psnr"], math.inf)
+        self.assertAlmostEqual(result["ssim"], 1.0)
+        self.assertEqual(result["pixels"], int(mask.sum()))
+
+    def test_a_worse_fill_scores_lower(self):
+        image, mask = scene(), disc()
+        near, far = image.copy(), image.copy()
+        near[mask] = np.clip(near[mask].astype(int) + 4, 0, 255)
+        far[mask] = 0
+        self.assertGreater(evaluate.score(image, near, mask)["psnr"], evaluate.score(image, far, mask)["psnr"])
+        self.assertGreater(evaluate.score(image, near, mask)["ssim"], evaluate.score(image, far, mask)["ssim"])
+
+    def test_only_the_hole_is_scored(self):
+        image, mask = scene(), disc()
+        restored = image.copy()
+        restored[mask] = 0
+        ruined_elsewhere = restored.copy()
+        ruined_elsewhere[:20, :20] = 255  # far from the hole
+        self.assertEqual(evaluate.score(image, restored, mask)["psnr"],
+                         evaluate.score(image, ruined_elsewhere, mask)["psnr"])
+
+    def test_an_empty_mask_is_a_perfect_score(self):
+        image = scene()
+        self.assertEqual(evaluate.score(image, image, np.zeros(image.shape[:2], dtype=bool))["pixels"], 0)
+
+    def test_blob_masks_are_reproducible_and_inside_the_image(self):
+        first = evaluate.blob_mask((300, 400, 3), seed=3)
+        np.testing.assert_array_equal(first, evaluate.blob_mask((300, 400, 3), seed=3))
+        self.assertFalse(np.array_equal(first, evaluate.blob_mask((300, 400, 3), seed=4)))
+        self.assertEqual(first.shape, (300, 400))
+        self.assertTrue(0.005 < segment.share(first) < 0.2)
+
+
+class LabelledPicture(unittest.TestCase):
+    def test_nothing_to_draw_changes_nothing(self):
+        image = scene()
+        np.testing.assert_array_equal(draw.overlay(image), image)
+
+    def test_boxes_labels_and_the_tint_are_drawn(self):
+        image, mask = scene(), disc()
+        objects = [Found("tree", (40, 40, 200, 200)), Found("bench", (220, 150, 300, 220))]
+        out = draw.overlay(image, objects, chosen=0, mask=mask)
+        self.assertEqual((out.shape, out.dtype), (image.shape, image.dtype))
+        self.assertFalse(np.array_equal(out[mask], image[mask]))      # tinted
+        self.assertFalse(np.array_equal(out[40, 40:200], image[40, 40:200]))  # box edge
+        np.testing.assert_array_equal(image, scene())  # the input is not drawn on
+
+
+class Availability(unittest.TestCase):
+    def test_the_answer_is_consistent(self):
+        status = models.availability()
+        if status.installed:
+            self.assertEqual(status.missing, ())
+        else:
+            self.assertTrue(status.missing)
+            self.assertFalse(status.cuda)
+        if not status.cuda:
+            self.assertEqual((status.gpu, status.vram_gb), ("", 0.0))
+
+    def test_the_preferred_fill_model_is_tried_first_and_the_other_kept_as_fallback(self):
+        self.assertEqual(models.fill_order(None), models.FILL_MODELS)
+        self.assertEqual(models.fill_order(models.SD15), (models.SD15, models.SDXL))
+        self.assertEqual(models.fill_order(models.SDXL), (models.SDXL, models.SD15))
+        self.assertEqual(models.fill_order("not a model"), models.FILL_MODELS)
+
+    def test_every_fill_model_is_configured(self):
+        for name in models.FILL_MODELS:
+            for table in (models.LABELS, models.NATIVE_SIZE, models.STEPS, models.GUIDANCE, models.STRENGTH):
+                self.assertIn(name, table)
+
+
+class LightImports(unittest.TestCase):
+    def test_importing_the_package_does_not_import_the_heavy_libraries(self):
+        # The compressor, the CLI and every other page share this process;
+        # none of them may pay for torch.
+        probe = (
+            "import sys\n"
+            "from pixelopt.vision import detect, draw, evaluate, inpaint, models, reason, segment\n"
+            "print(sorted(n for n in ('torch', 'transformers', 'diffusers') if n in sys.modules))\n"
+        )
+        run = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                             cwd=ROOT, timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), "[]")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -28,6 +28,7 @@ PAGES = {
     "optimize": None,
     "form photo": "app_pages/form_photo.py",
     "batch": "app_pages/batch.py",
+    "objects": "app_pages/objects.py",
 }
 
 
@@ -71,6 +72,29 @@ class ReferenceDownload(unittest.TestCase):
         self.assertTrue(data.startswith(b"\x89PNG"))
         decoded = np.asarray(Image.open(io.BytesIO(data)).convert("RGB"))
         np.testing.assert_array_equal(decoded, array)
+
+
+class Suggestions(unittest.TestCase):
+    def test_a_failed_suggestion_is_asked_for_again(self):
+        # The local model may simply not be up yet. Remembering its silence
+        # would make the Suggest button a dead end for that object.
+        import app_shared
+
+        buffer = io.BytesIO()
+        Image.fromarray(np.full((64, 64, 3), 120, dtype=np.uint8)).save(buffer, format="PNG")
+        raw = buffer.getvalue()
+        replies = [None, "bare branches"]
+        original = app_shared.reason.suggest_fill
+        app_shared.reason.suggest_fill = lambda *args, **kwargs: replies.pop(0)
+        try:
+            self.assertEqual(app_shared.vision_suggestion(raw, "leaves", (1, 2, 30, 40), "model"), "")
+            self.assertEqual(app_shared.vision_suggestion(raw, "leaves", (1, 2, 30, 40), "model"),
+                             "bare branches")
+            # A real answer is remembered: nothing is left to ask.
+            self.assertEqual(app_shared.vision_suggestion(raw, "leaves", (1, 2, 30, 40), "model"),
+                             "bare branches")
+        finally:
+            app_shared.reason.suggest_fill = original
 
 
 if __name__ == "__main__":
