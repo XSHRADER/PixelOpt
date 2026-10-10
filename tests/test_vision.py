@@ -27,7 +27,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pixelopt.vision import detect, draw, segment  # noqa: E402
+from pixelopt.vision import detect, draw, evaluate, inpaint, segment  # noqa: E402
 from pixelopt.vision.types import Found  # noqa: E402
 
 SIZE = (640, 480)  # width, height
@@ -166,6 +166,189 @@ class Masks(unittest.TestCase):
         mask = segment.box_mask((100, 200, 3), (50, 10, 90, 30))
         self.assertEqual(segment.bounding_box(mask), (50, 10, 90, 30))
         self.assertEqual(int(mask.sum()), 800)
+
+
+class ClassicalFill(unittest.TestCase):
+    def test_only_the_hole_changes(self):
+        image, mask = scene(), disc()
+        damaged = image.copy()
+        damaged[mask] = 0
+        filled = inpaint.classical(damaged, mask)
+        np.testing.assert_array_equal(filled[~mask], damaged[~mask])
+        self.assertFalse(np.array_equal(filled[mask], damaged[mask]))
+
+    def test_a_smooth_scene_is_restored_from_its_surroundings(self):
+        image, mask = scene(), disc()
+        damaged = image.copy()
+        damaged[mask] = 0
+        filled = inpaint.classical(damaged, mask)
+        hole_error = np.abs(damaged[mask].astype(float) - image[mask]).mean()
+        fill_error = np.abs(filled[mask].astype(float) - image[mask]).mean()
+        self.assertLess(fill_error, hole_error / 10)
+
+    def test_an_empty_mask_returns_an_untouched_copy(self):
+        image = scene()
+        filled = inpaint.classical(image, np.zeros(image.shape[:2], dtype=bool))
+        np.testing.assert_array_equal(filled, image)
+        self.assertIsNot(filled, image)
+
+
+class CropWindow(unittest.TestCase):
+    def assert_contains(self, window, mask):
+        x0, y0, x1, y1 = segment.bounding_box(mask)
+        self.assertLessEqual(window[0], x0)
+        self.assertLessEqual(window[1], y0)
+        self.assertGreaterEqual(window[2], x1)
+        self.assertGreaterEqual(window[3], y1)
+
+    def test_window_holds_the_mask_with_context_and_stays_in_the_image(self):
+        mask = disc(600, 800, centre=(700, 80), radius=60)
+        window = inpaint.crop_box(mask)
+        self.assert_contains(window, mask)
+        self.assertGreaterEqual(window[0], 0)
+        self.assertLessEqual(window[2], 800)
+        self.assertLessEqual(window[3], 600)
+        self.assertEqual(window[2] - window[0], window[3] - window[1])  # square
+        self.assertGreater(window[2] - window[0], 120)  # more than the mask alone
+
+    def test_a_small_mask_still_gets_the_minimum_window(self):
+        mask = disc(600, 800, centre=(400, 300), radius=10)
+        window = inpaint.crop_box(mask)
+        self.assertEqual(window[2] - window[0], inpaint.CROP_MINIMUM)
+
+    def test_an_image_smaller_than_the_minimum_is_used_whole(self):
+        mask = disc(40, 50, centre=(25, 20), radius=6)
+        self.assertEqual(inpaint.crop_box(mask), (0, 0, 50, 40))
+
+    def test_a_mask_covering_nearly_everything_gets_the_whole_image(self):
+        mask = np.ones((300, 400), dtype=bool)
+        mask[:2] = False
+        self.assertEqual(inpaint.crop_box(mask), (0, 0, 400, 300))
+
+    def test_an_empty_mask_gets_the_whole_image(self):
+        self.assertEqual(inpaint.crop_box(np.zeros((30, 40), dtype=bool)), (0, 0, 40, 30))
+
+    def test_work_size_is_a_multiple_of_eight_at_the_target(self):
+        self.assertEqual(inpaint.work_size(400, 400, 1024), (1024, 1024))
+        wide, tall = inpaint.work_size(451, 300, 1024)
+        self.assertEqual(wide, 1024)
+        self.assertEqual(tall % 8, 0)
+        self.assertEqual(inpaint.work_size(40, 4, 512), (512, 64))  # never below 64
+
+
+class GenerativeFill(unittest.TestCase):
+    """`generative` with a stand-in for the diffusion model."""
+
+    RED = (255, 0, 0)
+
+    def setUp(self):
+        self.calls = []
+
+    def painter(self, picture, hole, prompt, seed):
+        self.calls.append({"size": picture.size, "hole": hole, "prompt": prompt, "seed": seed})
+        # Like a real diffusion model, repaint the *whole* canvas.
+        return Image.new("RGB", picture.size, self.RED)
+
+    def test_nothing_outside_the_mask_changes_even_when_the_model_repaints_everything(self):
+        image, mask = scene(), disc()
+        filled = inpaint.generative(image, mask, "anything", self.painter, feather=4)
+        np.testing.assert_array_equal(filled[~mask], image[~mask])
+
+    def test_the_inside_is_what_the_model_painted(self):
+        image, mask = scene(), disc()
+        filled = inpaint.generative(image, mask, "anything", self.painter, feather=4)
+        np.testing.assert_array_equal(filled[120, 160], self.RED)
+        # Without a feather the whole mask is the model's.
+        hard = inpaint.generative(image, mask, "anything", self.painter, feather=0)
+        self.assertTrue((hard[mask] == self.RED).all())
+
+    def test_the_model_gets_a_canvas_it_can_work_on_and_the_prompt_and_seed(self):
+        image, mask = scene(), disc()
+        inpaint.generative(image, mask, "bare branches", self.painter, seed=7, target=512)
+        call = self.calls[0]
+        self.assertEqual(max(call["size"]), 512)
+        self.assertEqual((call["size"][0] % 8, call["size"][1] % 8), (0, 0))
+        self.assertEqual(call["hole"].size, call["size"])
+        self.assertEqual(call["hole"].mode, "L")
+        self.assertEqual(sorted(set(np.asarray(call["hole"]).ravel().tolist())), [0, 255])
+        self.assertEqual((call["prompt"], call["seed"]), ("bare branches", 7))
+
+    def test_the_model_never_sees_the_thing_being_removed(self):
+        image, mask = scene(), disc()
+        image[mask] = (0, 255, 0)  # a vivid green object on a scene with no such green
+
+        def painter(picture, hole, prompt, seed):
+            self.calls.append(np.asarray(picture))
+            return picture
+
+        inpaint.generative(image, mask, "x", painter, target=512)
+        seen = self.calls[0].astype(int)
+        vivid_green = (seen[..., 1] > 240) & (seen[..., 0] < 40) & (seen[..., 2] < 40)
+        self.assertEqual(int(vivid_green.sum()), 0)
+
+    def test_an_empty_mask_does_not_call_the_model(self):
+        image = scene()
+        filled = inpaint.generative(image, np.zeros(image.shape[:2], dtype=bool), "x", self.painter)
+        np.testing.assert_array_equal(filled, image)
+        self.assertEqual(self.calls, [])
+
+    def test_a_tiny_image_works(self):
+        image, mask = scene(40, 50), disc(40, 50, centre=(25, 20), radius=6)
+        filled = inpaint.generative(image, mask, "x", self.painter, target=512, feather=2)
+        self.assertEqual(filled.shape, image.shape)
+        np.testing.assert_array_equal(filled[~mask], image[~mask])
+
+    def test_a_mask_covering_nearly_everything_works(self):
+        image = scene()
+        mask = np.ones(image.shape[:2], dtype=bool)
+        mask[:3] = False
+        filled = inpaint.generative(image, mask, "x", self.painter, feather=0)
+        np.testing.assert_array_equal(filled[:3], image[:3])
+        self.assertTrue((filled[3:] == self.RED).all())
+
+    def test_composite_alone_keeps_the_outside_exact(self):
+        image, mask = scene(), disc()
+        painted = np.full_like(image, 200)
+        out = inpaint.composite(image, painted, mask, feather=10)
+        np.testing.assert_array_equal(out[~mask], image[~mask])
+        self.assertEqual(out.dtype, np.uint8)
+
+
+class Scoring(unittest.TestCase):
+    def test_a_perfect_fill(self):
+        image, mask = scene(), disc()
+        result = evaluate.score(image, image.copy(), mask)
+        self.assertEqual(result["psnr"], math.inf)
+        self.assertAlmostEqual(result["ssim"], 1.0)
+        self.assertEqual(result["pixels"], int(mask.sum()))
+
+    def test_a_worse_fill_scores_lower(self):
+        image, mask = scene(), disc()
+        near, far = image.copy(), image.copy()
+        near[mask] = np.clip(near[mask].astype(int) + 4, 0, 255)
+        far[mask] = 0
+        self.assertGreater(evaluate.score(image, near, mask)["psnr"], evaluate.score(image, far, mask)["psnr"])
+        self.assertGreater(evaluate.score(image, near, mask)["ssim"], evaluate.score(image, far, mask)["ssim"])
+
+    def test_only_the_hole_is_scored(self):
+        image, mask = scene(), disc()
+        restored = image.copy()
+        restored[mask] = 0
+        ruined_elsewhere = restored.copy()
+        ruined_elsewhere[:20, :20] = 255  # far from the hole
+        self.assertEqual(evaluate.score(image, restored, mask)["psnr"],
+                         evaluate.score(image, ruined_elsewhere, mask)["psnr"])
+
+    def test_an_empty_mask_is_a_perfect_score(self):
+        image = scene()
+        self.assertEqual(evaluate.score(image, image, np.zeros(image.shape[:2], dtype=bool))["pixels"], 0)
+
+    def test_blob_masks_are_reproducible_and_inside_the_image(self):
+        first = evaluate.blob_mask((300, 400, 3), seed=3)
+        np.testing.assert_array_equal(first, evaluate.blob_mask((300, 400, 3), seed=3))
+        self.assertFalse(np.array_equal(first, evaluate.blob_mask((300, 400, 3), seed=4)))
+        self.assertEqual(first.shape, (300, 400))
+        self.assertTrue(0.005 < segment.share(first) < 0.2)
 
 
 class LabelledPicture(unittest.TestCase):
