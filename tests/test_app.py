@@ -28,6 +28,7 @@ PAGES = {
     "optimize": None,
     "form photo": "app_pages/form_photo.py",
     "batch": "app_pages/batch.py",
+    "objects": "app_pages/objects.py",
 }
 
 

@@ -12,8 +12,10 @@ encode for nothing.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import io
+import time
 from typing import Callable, Dict, Optional
 
 import cv2
@@ -28,6 +30,8 @@ from pixelopt.enhance import Enhancements, auto_enhancements, estimate_noise, pr
 from pixelopt.forms import FormSpec, encode_for_form
 from pixelopt.image_features import load_image
 from pixelopt.pipeline import process, process_to_quality, rate_distortion_curve
+from pixelopt.vision import inpaint, reason, segment
+from pixelopt.vision import models as vision_models
 from ui_components import bytes_data_url, image_data_url, rgba_data_url
 
 UPLOAD_TYPES = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"]
@@ -178,3 +182,82 @@ def form_job(spec: FormSpec, measure: bool) -> Callable[[str, bytes], Dict[str, 
             summary["notes"] = "OVER LIMIT; " + summary["notes"]
         return summary
     return job
+
+
+# ------------------------------------------------------------------ vision
+# The Objects page. Importing pixelopt.vision loads no heavy library -- torch
+# and friends are imported only when a model is first used -- so these names
+# cost the other pages nothing.
+
+# Detection, outlining and filling all work on one capped copy of the upload.
+VISION_MAX_SIDE = 1600
+
+
+@st.cache_resource(show_spinner=False)
+def vision_hub():
+    return vision_models.Hub()
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def vision_image(raw: bytes):
+    """The upload as RGB at working size, and its original (width, height)."""
+    image = load_image(io.BytesIO(raw))
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    height, width = image.shape[:2]
+    scale = VISION_MAX_SIDE / max(height, width)
+    if scale < 1.0:
+        image = cv2.resize(image, (max(1, round(width * scale)), max(1, round(height * scale))),
+                           interpolation=cv2.INTER_AREA)
+    return np.ascontiguousarray(image[..., :3]), (width, height)
+
+
+def _vision_picture(raw: bytes) -> Image.Image:
+    return Image.fromarray(vision_image(raw)[0])
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def vision_scene(raw: bytes):
+    return vision_hub().describe(_vision_picture(raw))
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def vision_find(raw: bytes, name: str):
+    return vision_hub().find(_vision_picture(raw), name)
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def vision_mask(raw: bytes, box: tuple):
+    return vision_hub().mask_for(_vision_picture(raw), box)
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def vision_suggestion(raw: bytes, name: str, box: tuple, model: str) -> str:
+    # Ollama needs the GPU memory the detector and segmenter are holding.
+    vision_hub().rest()
+    return reason.suggest_fill(_vision_picture(raw), name, model, box=box) or ""
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def vision_classical(raw: bytes, box: tuple, grow_px: int):
+    image = vision_image(raw)[0]
+    return inpaint.classical(image, segment.grow(vision_mask(raw, box), grow_px))
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def vision_generated(raw: bytes, box: tuple, grow_px: int, prompt: str, seed: int, model: str):
+    image = vision_image(raw)[0]
+    hub = vision_hub()
+    started = time.perf_counter()
+    # The blend back into the photo happens inside the grown margin, over
+    # background, so it is kept to half of it.
+    result = inpaint.generative(image, segment.grow(vision_mask(raw, box), grow_px), prompt,
+                                functools.partial(hub.paint, prefer=model), seed=seed,
+                                feather=max(1, grow_px // 2))
+    return {"image": result, "model": vision_models.LABELS[hub.painted_with],
+            "seconds": time.perf_counter() - started}
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def array_url(array: np.ndarray) -> str:
+    return image_data_url(Image.fromarray(array))

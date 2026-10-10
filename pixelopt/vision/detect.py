@@ -112,6 +112,16 @@ def _repeats(found: Found, other: Found) -> bool:
     return overlap >= (SAME_NAME_IOU if found.name == other.name else SAME_BOX_IOU)
 
 
+def already_listed(found: Found, listed: Iterable[Found]) -> Optional[Found]:
+    """The listed item `found` repeats, or None when it is something new.
+
+    An open-vocabulary detector would rather box something than nothing:
+    asked for a nonsense word it returned the tree. Checking a search hit
+    against the list stops that from renaming what is already there.
+    """
+    return next((other for other in listed if _repeats(found, other)), None)
+
+
 def merge(passes: Iterable[Iterable[Found]]) -> List[Found]:
     """One list from several passes, without repeats, largest first.
 

@@ -129,6 +129,15 @@ class MergeAndNumber(unittest.TestCase):
         scene_found = Asked(None, None).describe(Image.new("RGB", (1024, 1024)))
         self.assertEqual([item.name for item in scene_found.objects], ["large tree"])
 
+    def test_a_search_hit_on_something_already_listed_is_recognised(self):
+        # Measured: asked for a nonsense word, the detector returned the tree's
+        # box. A search must not rename what is already in the list.
+        listed = [Found("tree", (98, 194, 976, 902)), Found("trunk", (480, 603, 640, 896))]
+        hit = Found("qzxv", (95, 193, 979, 907))
+        self.assertEqual(detect.already_listed(hit, listed), listed[0])
+        self.assertIsNone(detect.already_listed(Found("bird", (10, 10, 60, 50)), listed))
+        self.assertIsNone(detect.already_listed(hit, []))
+
     def test_separate_things_with_one_name_are_all_kept(self):
         people = [Found("person", (0, 0, 50, 100)), Found("person", (300, 0, 350, 100))]
         self.assertEqual(len(detect.merge([people])), 2)

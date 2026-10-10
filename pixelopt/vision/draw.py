@@ -33,7 +33,7 @@ def overlay(image: np.ndarray, objects: Sequence[Found] = (), chosen: Optional[i
     """
     out = image.copy()
     scale = max(image.shape[:2]) / 1000.0
-    line = max(2, int(round(2 * scale)))
+    line = max(2, int(round(3 * scale)))
 
     if mask is not None and mask.any():
         tint = np.array(TINT, dtype=np.float32)
@@ -46,7 +46,7 @@ def overlay(image: np.ndarray, objects: Sequence[Found] = (), chosen: Optional[i
         return out
     picture = Image.fromarray(out)
     pen = ImageDraw.Draw(picture)
-    font = _font(max(12, int(round(15 * scale))))
+    font = _font(max(12, int(round(28 * scale))))
     for index, item in enumerate(objects):
         colour = PALETTE[index % len(PALETTE)]
         x0, y0, x1, y1 = item.box
