@@ -27,4 +27,4 @@ app = [
 pixelopt = "pixelopt.cli:main"
 
 [tool.setuptools]
-packages = ["pixelopt"]
+packages = ["pixelopt", "pixelopt.vision"]
