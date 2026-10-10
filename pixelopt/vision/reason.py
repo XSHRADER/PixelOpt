@@ -85,11 +85,18 @@ def suggest_fill(image: Image.Image, name: str, model: str, box: Optional[Sequen
     answered: it holds about 6 GB of the GPU, which the fill model needs next.
     """
     plain = _COUNTER.sub("", str(name)).strip() or "object"
-    where = "outlined in red " if box is not None else ""
+    area = "the area outlined in red" if box is not None else f"the area the {plain} covers"
+    # Worded as a brief to a painter because that is what the answer becomes.
+    # Asked plainly what "would be visible", the model says "sky" for a tree's
+    # leaves; asked what they are attached to or hiding, it says "trunk and
+    # branches". Negations are ruled out because an image model paints the
+    # noun it is given: "a tree without leaves" gets leaves.
     prompt = (
-        f'The {plain} {where}in this photo will be erased. In one short phrase of at most '
-        "twelve words, describe what would most plausibly be visible in its place. "
-        "Reply with the phrase only."
+        f"A painter must repaint {area} as if the {plain} had never been there. "
+        f"Think about what the {plain} is attached to or hiding. In at most twelve words, "
+        "name what the painter should paint there. Name only things that will be visible: "
+        f'do not mention the {plain}, and do not use the words "no" or "without". '
+        "Reply with the description only."
     )
     payload = {
         "model": model,

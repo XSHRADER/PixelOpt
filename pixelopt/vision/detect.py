@@ -29,8 +29,13 @@ MIN_SIDE = 8
 MAX_FRAME_SHARE = 0.95
 # Dense captions can come back as whole sentences; a name is short.
 MAX_NAME_LENGTH = 40
-# Boxes overlapping past this are the same thing under two names.
-SAME_THING_IOU = 0.6
+# Two boxes with one name are a repeat once they overlap this much.
+SAME_NAME_IOU = 0.6
+# Two boxes with different names are one thing only when they nearly coincide.
+# A part often fills most of its whole -- on the photo this was tuned on, the
+# leaves cover 78% of the tree's box -- and dropping the part would drop the
+# very thing someone wants to remove.
+SAME_BOX_IOU = 0.9
 
 _ARTICLE = re.compile(r"^(a|an|the|some|this|that)\s+", re.IGNORECASE)
 _TAG = re.compile(r"<[^>]*>")
@@ -102,16 +107,21 @@ def iou(a: Box, b: Box) -> float:
     return overlap / union if union > 0 else 0.0
 
 
-def merge(passes: Iterable[Iterable[Found]], threshold: float = SAME_THING_IOU) -> List[Found]:
+def _repeats(found: Found, other: Found) -> bool:
+    overlap = iou(found.box, other.box)
+    return overlap >= (SAME_NAME_IOU if found.name == other.name else SAME_BOX_IOU)
+
+
+def merge(passes: Iterable[Iterable[Found]]) -> List[Found]:
     """One list from several passes, without repeats, largest first.
 
-    Two items are the same thing when their boxes overlap past the threshold,
-    whatever each pass called it. The earlier pass's name is kept, so order
-    the passes from most to least trusted.
+    An item repeats an earlier one when it has the same name and a similar
+    box, or a nearly identical box under any name. The earlier one is kept,
+    so order the passes from most to least trusted.
     """
     kept: List[Found] = []
     for found in (item for group in passes for item in group):
-        if all(iou(found.box, other.box) < threshold for other in kept):
+        if not any(_repeats(found, other) for other in kept):
             kept.append(found)
     return sorted(kept, key=lambda item: (-item.area, item.name, item.box))
 
@@ -150,9 +160,10 @@ class Detector:
         detected = parse_detections(self._ask(image, DETECT), DETECT, image.size)
         grounded = (parse_detections(self._ask(image, GROUND, caption), GROUND, image.size)
                     if caption else [])
-        # The detector's own labels are plainer ("tree") than caption phrases
-        # ("large oak tree in the centre"), so they win a tie.
-        return Scene(caption, tuple(merge([detected, grounded])))
+        # Caption phrases win a tie. The detector answers from a fixed set of
+        # labels and guesses when nothing fits: it called a lone oak a
+        # "houseplant". A phrase was written about this image.
+        return Scene(caption, tuple(merge([grounded, detected])))
 
     def find(self, image: "Image.Image", name: str) -> List[Found]:
         """Every place the typed name appears, all carrying that name."""

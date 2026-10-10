@@ -27,7 +27,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pixelopt.vision import detect, draw, evaluate, inpaint, reason, segment  # noqa: E402
+from pixelopt.vision import detect, draw, evaluate, inpaint, models, reason, segment  # noqa: E402
 from pixelopt.vision.types import Found  # noqa: E402
 
 SIZE = (640, 480)  # width, height
@@ -103,6 +103,31 @@ class MergeAndNumber(unittest.TestCase):
         first = [Found("tree", (100, 100, 300, 400))]
         second = [Found("large oak tree", (104, 98, 298, 396)), Found("bench", (400, 300, 500, 380))]
         self.assertEqual([item.name for item in detect.merge([first, second])], ["tree", "bench"])
+
+    def test_a_part_is_kept_beside_its_whole(self):
+        # Measured on a real photo: the leaves fill 78% of the tree's box.
+        # They are different things, and the leaves are the one to remove.
+        found = [Found("tree", (98, 194, 976, 902)), Found("leaves", (102, 197, 974, 754))]
+        self.assertEqual([item.name for item in detect.merge([found])], ["tree", "leaves"])
+
+    def test_one_name_needs_less_overlap_to_count_as_a_repeat(self):
+        found = [Found("leaves", (102, 197, 974, 754)), Found("leaves", (95, 194, 980, 776))]
+        self.assertEqual(len(detect.merge([found])), 1)
+
+    def test_caption_names_beat_the_detectors_guess(self):
+        # The same real photo: the fixed-vocabulary detector called the tree a houseplant.
+        class Asked(detect.Detector):
+            answers = {
+                detect.CAPTION: {detect.CAPTION: "A large tree in a field."},
+                detect.DETECT: {detect.DETECT: {"bboxes": [[92, 190, 981, 911]], "labels": ["houseplant"]}},
+                detect.GROUND: {detect.GROUND: {"bboxes": [[98, 194, 976, 902]], "labels": ["A large tree"]}},
+            }
+
+            def _ask(self, image, task, text=""):
+                return self.answers[task]
+
+        scene_found = Asked(None, None).describe(Image.new("RGB", (1024, 1024)))
+        self.assertEqual([item.name for item in scene_found.objects], ["large tree"])
 
     def test_separate_things_with_one_name_are_all_kept(self):
         people = [Found("person", (0, 0, 50, 100)), Found("person", (300, 0, 350, 100))]
@@ -246,21 +271,67 @@ class GenerativeFill(unittest.TestCase):
 
     def painter(self, picture, hole, prompt, seed):
         self.calls.append({"size": picture.size, "hole": hole, "prompt": prompt, "seed": seed})
-        # Like a real diffusion model, repaint the *whole* canvas.
-        return Image.new("RGB", picture.size, self.RED)
+        # Like an inpainting model: paint the hole, hand back the rest as given.
+        painted = np.asarray(picture).copy()
+        painted[np.asarray(hole) > 127] = self.RED
+        return Image.fromarray(painted)
 
     def test_nothing_outside_the_mask_changes_even_when_the_model_repaints_everything(self):
         image, mask = scene(), disc()
-        filled = inpaint.generative(image, mask, "anything", self.painter, feather=4)
+
+        def careless(picture, hole, prompt, seed):
+            # A real diffusion model shifts the whole canvas a little.
+            return Image.fromarray(255 - np.asarray(picture))
+
+        filled = inpaint.generative(image, mask, "anything", careless, feather=4)
         np.testing.assert_array_equal(filled[~mask], image[~mask])
+
+    def test_a_tone_shift_over_the_whole_picture_is_undone_in_the_hole(self):
+        # Measured on SDXL: it brightened even the pixels it was told to keep,
+        # by about (+14, +11, +9), which left the hole's outline visible.
+        image, mask = scene(), disc()
+        drift = np.array([14, 11, 9])
+
+        def brightening(picture, hole, prompt, seed):
+            return Image.fromarray(np.clip(np.asarray(picture).astype(int) + drift, 0, 255).astype(np.uint8))
+
+        filled = inpaint.generative(image, mask, "x", brightening, target=512, feather=0)
+        plain = inpaint.generative(image, mask, "x", lambda picture, *_: picture, target=512, feather=0)
+        error = np.abs(filled[mask].astype(int) - plain[mask].astype(int)).mean()
+        self.assertLess(error, 2.0)
+
+    def test_harmonise_removes_the_shift_and_keeps_what_was_painted(self):
+        image, mask = scene(), disc()
+        wanted = image.copy()
+        wanted[110:130, 140:180] = (40, 30, 20)          # a dark branch across the hole
+        painted = np.clip(wanted.astype(int) + (14, 11, 9), 0, 255).astype(np.uint8)
+        fixed = inpaint.harmonise(image, painted, mask)
+        self.assertLess(np.abs(fixed[mask].astype(int) - wanted[mask].astype(int)).mean(), 2.0)
+        self.assertGreater(np.abs(painted[mask].astype(int) - wanted[mask].astype(int)).mean(), 8.0)
+
+    def test_harmonise_leaves_a_faithful_painting_alone(self):
+        image, mask = scene(), disc()
+        painted = image.copy()
+        painted[mask] = self.RED
+        np.testing.assert_array_equal(inpaint.harmonise(image, painted, mask), painted)
+
+    def test_harmonise_with_nothing_to_compare_against_changes_nothing(self):
+        image = scene()
+        painted = np.full_like(image, 90)
+        everything = np.ones(image.shape[:2], dtype=bool)
+        np.testing.assert_array_equal(inpaint.harmonise(image, painted, everything), painted)
+        nothing = np.zeros(image.shape[:2], dtype=bool)
+        np.testing.assert_array_equal(inpaint.harmonise(image, painted, nothing), painted)
 
     def test_the_inside_is_what_the_model_painted(self):
         image, mask = scene(), disc()
-        filled = inpaint.generative(image, mask, "anything", self.painter, feather=4)
-        np.testing.assert_array_equal(filled[120, 160], self.RED)
-        # Without a feather the whole mask is the model's.
-        hard = inpaint.generative(image, mask, "anything", self.painter, feather=0)
-        self.assertTrue((hard[mask] == self.RED).all())
+        inside = disc(radius=26)  # clear of the rim, where resizing blends the two sides
+        for feather in (0, 3):
+            with self.subTest(feather=feather):
+                filled = inpaint.generative(image, mask, "anything", self.painter, feather=feather)
+                # Within a couple of levels: resizing the window up and back is
+                # not lossless, and the tone correction sees that as a tiny shift.
+                self.assertLessEqual(np.abs(filled[inside].astype(int) - self.RED).max(), 2)
 
     def test_the_model_gets_a_canvas_it_can_work_on_and_the_prompt_and_seed(self):
         image, mask = scene(), disc()
@@ -304,7 +375,7 @@ class GenerativeFill(unittest.TestCase):
         mask[:3] = False
         filled = inpaint.generative(image, mask, "x", self.painter, feather=0)
         np.testing.assert_array_equal(filled[:3], image[:3])
-        self.assertTrue((filled[3:] == self.RED).all())
+        self.assertTrue((filled[40:] == self.RED).all())
 
     def test_composite_alone_keeps_the_outside_exact(self):
         image, mask = scene(), disc()
@@ -386,7 +457,14 @@ class LocalModel(unittest.TestCase):
         picture = Image.open(io.BytesIO(base64.b64decode(sent["images"][0])))
         self.assertLessEqual(max(picture.size), reason.MAX_SIDE)
         # The counter is ours, not part of the thing's name; the box is mentioned.
-        self.assertIn("The person outlined in red", sent["prompt"])
+        self.assertIn("as if the person had never been there", sent["prompt"])
+        self.assertNotIn("person 2", sent["prompt"])
+        self.assertIn("outlined in red", sent["prompt"])
+
+    def test_without_a_box_the_prompt_does_not_mention_an_outline(self):
+        reason.suggest_fill(self.image, "leaves", "qwen2.5vl:7b", url=self.url)
+        self.assertNotIn("outlined in red", _Ollama.requests[0]["prompt"])
+        self.assertIn("as if the leaves had never been there", _Ollama.requests[0]["prompt"])
 
     def test_an_unusable_reply_is_none(self):
         for reply in ("", "   \n  ", "<think>hmm</think>"):
@@ -456,6 +534,44 @@ class LabelledPicture(unittest.TestCase):
         self.assertFalse(np.array_equal(out[mask], image[mask]))      # tinted
         self.assertFalse(np.array_equal(out[40, 40:200], image[40, 40:200]))  # box edge
         np.testing.assert_array_equal(image, scene())  # the input is not drawn on
+
+
+class Availability(unittest.TestCase):
+    def test_the_answer_is_consistent(self):
+        status = models.availability()
+        if status.installed:
+            self.assertEqual(status.missing, ())
+        else:
+            self.assertTrue(status.missing)
+            self.assertFalse(status.cuda)
+        if not status.cuda:
+            self.assertEqual((status.gpu, status.vram_gb), ("", 0.0))
+
+    def test_the_preferred_fill_model_is_tried_first_and_the_other_kept_as_fallback(self):
+        self.assertEqual(models.fill_order(None), models.FILL_MODELS)
+        self.assertEqual(models.fill_order(models.SD15), (models.SD15, models.SDXL))
+        self.assertEqual(models.fill_order(models.SDXL), (models.SDXL, models.SD15))
+        self.assertEqual(models.fill_order("not a model"), models.FILL_MODELS)
+
+    def test_every_fill_model_is_configured(self):
+        for name in models.FILL_MODELS:
+            for table in (models.LABELS, models.NATIVE_SIZE, models.STEPS, models.GUIDANCE, models.STRENGTH):
+                self.assertIn(name, table)
+
+
+class LightImports(unittest.TestCase):
+    def test_importing_the_package_does_not_import_the_heavy_libraries(self):
+        # The compressor, the CLI and every other page share this process;
+        # none of them may pay for torch.
+        probe = (
+            "import sys\n"
+            "from pixelopt.vision import detect, draw, evaluate, inpaint, models, reason, segment\n"
+            "print(sorted(n for n in ('torch', 'transformers', 'diffusers') if n in sys.modules))\n"
+        )
+        run = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                             cwd=ROOT, timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), "[]")
 
 
 if __name__ == "__main__":

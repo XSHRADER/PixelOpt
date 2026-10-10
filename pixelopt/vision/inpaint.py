@@ -33,6 +33,8 @@ Painter = Callable[[Image.Image, Image.Image, str, int], Image.Image]
 CROP_MARGIN = 0.4
 # The smallest window worth handing to a model trained on 512-1024 px images.
 CROP_MINIMUM = 256
+# A tone shift is smooth, so it is estimated on a copy this many pixels across.
+HARMONISE_SIDE = 128
 
 
 def classical(image: np.ndarray, mask: np.ndarray, radius: int = 5) -> np.ndarray:
@@ -89,13 +91,51 @@ def composite(original: np.ndarray, painted: np.ndarray, mask: np.ndarray,
     return out
 
 
+def harmonise(original: np.ndarray, painted: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Undo the tone shift a diffusion model applies to the whole picture.
+
+    Measured on SDXL: it brightened even the pixels it was told to keep, by
+    about (+14, +11, +9). Its painting is consistent with itself, so nothing
+    looks wrong until it is pasted into the darker original -- and then the
+    hole's outline shows as a pale shape.
+
+    Outside the hole the truth is known, so the shift can be measured there:
+    original minus painted. That difference is kept only at low resolution,
+    which discards texture and keeps tone, and is carried into the hole by
+    classical inpainting, the same tool used for the baseline fill. Adding it
+    back moves the painting onto the original's tone without touching what
+    was painted.
+    """
+    solid = np.asarray(mask).astype(bool)
+    if not solid.any() or solid.all():
+        return painted
+    height, width = solid.shape
+    scale = min(1.0, HARMONISE_SIDE / max(height, width))
+    size = (max(8, round(width * scale)), max(8, round(height * scale)))
+
+    shift = cv2.resize(original.astype(np.float32) - painted.astype(np.float32), size,
+                       interpolation=cv2.INTER_AREA)
+    # Any cell the hole touches is unknown, plus one more: a cell that mixes
+    # painted content into the estimate would smear it across the hole.
+    hole = cv2.resize(solid.astype(np.float32), size, interpolation=cv2.INTER_AREA) > 0
+    hole = cv2.dilate(hole.astype(np.uint8), np.ones((3, 3), np.uint8))
+    if hole.all():
+        return painted
+    packed = np.clip(np.rint(shift + 128.0), 0, 255).astype(np.uint8)
+    spread = cv2.inpaint(packed, hole, 3, cv2.INPAINT_TELEA).astype(np.float32) - 128.0
+    spread = cv2.GaussianBlur(spread, (0, 0), 1.5)
+    field = cv2.resize(spread, (width, height), interpolation=cv2.INTER_LINEAR)
+    return np.clip(np.rint(painted.astype(np.float32) + field), 0, 255).astype(np.uint8)
+
+
 def generative(image: np.ndarray, mask: np.ndarray, prompt: str, painter: Painter,
                seed: int = 0, target: int = 1024, feather: int = 6) -> np.ndarray:
     """Fill the mask with what `painter` paints for `prompt`.
 
     The model only ever sees a window around the mask, resized to the
-    resolution it was trained at, and its answer is composited back through
-    the mask. Whatever it did to the rest of the window is thrown away.
+    resolution it was trained at. Its answer is moved back onto the
+    original's tone (see harmonise) and composited through the mask, so
+    whatever it did to the rest of the window is thrown away.
     """
     solid = np.asarray(mask).astype(bool)
     if not solid.any():
@@ -114,6 +154,7 @@ def generative(image: np.ndarray, mask: np.ndarray, prompt: str, painter: Painte
     hole = Image.fromarray(window_mask.astype(np.uint8) * 255).resize(size, Image.NEAREST)
     painted = painter(picture, hole, prompt, int(seed)).convert("RGB")
     restored = np.asarray(painted.resize((x1 - x0, y1 - y0), Image.LANCZOS))
+    restored = harmonise(window, restored, window_mask)
 
     out = image.copy()
     out[y0:y1, x0:x1] = composite(window, restored, window_mask, feather)
