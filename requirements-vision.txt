@@ -1,0 +1,18 @@
+# Optional: the Objects page (name what is in an image, remove one thing,
+# predict what was behind it). The compressor, the CLI and the other pages
+# need none of this, which is why it is not in requirements.txt.
+#
+# Install the GPU build of PyTorch first, from PyTorch's own index, or pip
+# will fetch the CPU-only build:
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+#   pip install -r requirements-vision.txt
+#
+# The first use of the page then downloads about 10 GB of model weights.
+# Tested with torch 2.14, transformers 5.19 and diffusers 0.41.
+torch>=2.6
+torchvision>=0.21
+transformers>=5.19,<6.0
+diffusers>=0.41,<1.0
+accelerate>=1.0
+safetensors>=0.4

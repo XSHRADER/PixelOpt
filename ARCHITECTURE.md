@@ -116,17 +116,26 @@ how a photograph is meant to look, and that is not the tool's call.
 | `pixelopt/batch.py` | run a job over many files with failures isolated; ZIP and CSV export |
 | `pixelopt/image_features.py` | loading (EXIF, transparency), content stats, quality metrics |
 | `pixelopt/cli.py` | command-line entry point, batch handling |
+| `pixelopt/vision/detect.py` | parse and merge Florence-2 output; `Detector` |
+| `pixelopt/vision/segment.py` | grow and feather masks; `Segmenter` (SAM 2.1) |
+| `pixelopt/vision/inpaint.py` | classical and generative fills, harmonising, compositing |
+| `pixelopt/vision/reason.py` | client for a local vision model served by Ollama |
+| `pixelopt/vision/models.py` | availability check, model loading, sharing the GPU |
+| `pixelopt/vision/evaluate.py` | score a fill against known pixels |
+| `pixelopt/vision/draw.py` | the labelled picture |
 | `app.py` | Streamlit entry point: page config, styling, top navigation |
-| `app_pages/` | the Optimize, Form photo and Batch pages |
+| `app_pages/` | the Optimize, Form photo, Batch and Objects pages |
 | `app_shared.py` | cached Streamlit helpers shared by pages, batch job factories |
 | `ui_components.py` | static page header, intro cards, workbench columns, count-up metric strip, range meter, slide/flicker/heatmap viewer |
-| `benchmark.py` | the measurements the README publishes |
+| `benchmark.py` | the compression measurements the README publishes |
+| `benchmark_vision.py` | the hide-and-restore measurement of the two fills |
 | `tests/test_compression.py` | compressor and loader tests |
 | `tests/test_enhance.py` | enhancement, pipeline and curve tests |
 | `tests/test_features.py` | form photo mode, damage heatmap and batch tests |
 | `tests/test_quality_passthrough.py` | quality-target mode and kept-original tests |
 | `tests/test_launcher.py` | launcher helper tests |
 | `tests/test_app.py` | every page renders (Streamlit AppTest) |
+| `tests/test_vision.py` | the Objects engine, without any model or GPU |
 
 ## Call order
 
@@ -241,6 +250,97 @@ The custom components read Streamlit's `--st-*` theme variables, so they
 follow the config. The remaining hand-written CSS is small: the header bar,
 intro-card hover, and monospaced figures in the Details tables.
 
+## The Objects page
+
+Name what is in an image, remove one thing, predict what was behind it. The
+engine is `pixelopt/vision/`; the page is `app_pages/objects.py`.
+
+```text
+upload
+  ├── detect.Detector.describe()     Florence-2: caption, detected objects, caption phrases grounded
+  │     └── merge() + number()       one list, no repeats, unique display names
+  ├── detect.Detector.find()         Florence-2 open-vocabulary detection for a typed name
+  ├── segment.Segmenter.mask_for()   SAM 2.1: box -> mask
+  │     └── segment.grow()           widen it, so no rim of the object survives
+  ├── reason.suggest_fill()          Ollama: what is the object attached to or hiding?
+  ├── inpaint.classical()            OpenCV Telea
+  └── inpaint.generative()
+        ├── crop_box()               a window around the mask, with context
+        ├── classical()              blank the hole, so the model never sees the object
+        ├── painter(...)             models.Hub.paint: SDXL or SD 1.5
+        ├── harmonise()              undo the model's tone shift
+        └── composite()              through the mask; outside pixels are the input's
+```
+
+### Decisions and their reasons
+
+**Why nothing heavy is imported until a model runs.** `torch`, `transformers`
+and `diffusers` are imported inside the functions that load or run a model,
+never at module level. The compressor, the CLI and the other pages share one
+process with this page and must not pay seconds of import time, or fail to
+start, for a feature they do not use. A test imports the whole subpackage in a
+fresh interpreter and checks none of the three was loaded.
+
+**Why one large model on the GPU at a time.** Measured peaks on an 8 GB card:
+Florence-2 1.8 GB, SAM 2.1 1.3 GB (2.3 GB resident together), SDXL 5.4 GB,
+SD 1.5 2.5 GB, and Ollama's vision model about 6 GB. They do not fit together.
+`Hub.rest()` moves the two small models to main memory before a fill model or
+Ollama needs the card, and `keep_alive: 0` makes Ollama unload after each
+answer. That unloading is why a suggestion takes 10-30 s, and why it is a
+button rather than something run on every selection.
+
+**Why caption phrases outrank the detector, and a part is kept beside its
+whole.** Florence-2's object detector answers from a fixed set of labels and
+guesses when nothing fits: it called a lone oak a "houseplant". Phrases
+grounded from the caption were written about this image, so they win a tie.
+And `merge()` treats two differently named boxes as one thing only when they
+nearly coincide (IoU 0.9), because a part often fills most of its whole: the
+leaves cover 78% of the tree's box, and dropping them drops the thing someone
+wants to remove.
+
+**Why a search hit is checked against the list.** An open-vocabulary detector
+would rather box something than nothing. Asked for a nonsense word it returned
+the tree. `already_listed()` reports such a hit instead of letting it rename
+what is there. A wrong box in a *new* place is still added; the outline is
+shown before anything is removed, so the mistake is visible.
+
+**Why the hole is filled classically before the model sees it.** An
+inpainting pipeline starts from a noised copy of its input. A trace of green
+leaves in that copy pulls the answer back towards leaves, so the hole is
+blanked with the classical fill first.
+
+**Why the result is harmonised.** SDXL brightens the whole picture, including
+the pixels it was told to keep, by about (+14, +11, +9). Its painting is
+consistent with itself, so nothing looks wrong until it is pasted into the
+darker original, where the hole's outline shows as a pale shape.
+`harmonise()` measures the shift where the truth is known -- original minus
+painted, outside the hole, at low resolution so texture is discarded and tone
+kept -- carries it into the hole with classical inpainting, and adds it back.
+The sky just inside the hole went from 17 levels brighter than its
+surroundings to within 3.
+
+**Why the fill is composited through the mask.** A diffusion model repaints
+its whole canvas slightly. Compositing its answer back through the mask is
+what lets the page promise that only the hole changed, and the blend back in
+is eased *inside* the grown margin, over background, so the easing never
+reveals the object's rim.
+
+**Why the question to the local model is a painter's brief.** Asked what
+"would be visible" without a tree's leaves, the model said "clear blue sky".
+Asked what the leaves are attached to or hiding, it says "tree trunk and
+branches". Negations are ruled out in the prompt because an image model
+paints the noun it is given: "a tree without leaves" gets leaves. SD 1.5 is
+more literal still and needs "bare" spelled out, which the page's help says.
+
+### Measured, not assumed
+
+`benchmark_vision.py` hides regions whose true pixels are known and scores
+both fills inside the hole (`evaluate.score`). The generated fill won four of
+eight holes. It loses where it invents -- it painted a rocket into empty sky
+because the description mentioned one -- and where pixel metrics reward a
+blurry smear over sharp, plausible texture. Both are documented in the README
+next to the table rather than averaged away.
+
 ## Known limitations
 
 - `BPP_TARGET = 0.55` is one constant for all content. A flat image and a noisy
@@ -257,6 +357,18 @@ intro-card hover, and monospaced figures in the Details tables.
   count, so a 12 MP image is slow. A faster path is needed there.
 - The noise estimator underestimates by roughly a third; the auto-strength
   factor compensates, but a recalibration would be cleaner than a constant.
+- The Objects page's generated fill is a prediction. It invents what the
+  description names, whether or not it was there, and differs with each seed.
+- Open-vocabulary detection can box something for a name that is not in the
+  image. Only a hit on an already-listed object is caught.
+- A faint outline of the removed object can remain after harmonising, about
+  3 levels in a smooth sky.
+- The Objects page works on a copy capped at 1600 px on the longer side, and
+  removes one object at a time.
+- The fills are scored with PSNR and SSIM only, which favour blur. There is
+  no learned perceptual metric.
+- CI cannot run the models. It tests everything around them; the models are
+  checked by `benchmark_vision.py` and in the browser on a machine with a GPU.
 
 ## Running things
 
@@ -267,6 +379,7 @@ set PYTHONPATH=.                    # or export, on POSIX
 python tests/test_compression.py -v
 python tests/test_enhance.py -v
 python tests/test_app.py -v
+python tests/test_vision.py -v
 python benchmark.py
 streamlit run app.py
 ```

@@ -22,9 +22,18 @@ app = [
     "altair>=5.0.0,<7.0.0",
     "pandas>=2.0.0,<4.0.0",
 ]
+# The Objects page. Install the GPU build of torch first; see requirements-vision.txt.
+vision = [
+    "torch>=2.6",
+    "torchvision>=0.21",
+    "transformers>=5.19,<6.0",
+    "diffusers>=0.41,<1.0",
+    "accelerate>=1.0",
+    "safetensors>=0.4",
+]
 
 [project.scripts]
 pixelopt = "pixelopt.cli:main"
 
 [tool.setuptools]
-packages = ["pixelopt"]
+packages = ["pixelopt", "pixelopt.vision"]

@@ -23,6 +23,7 @@ page = st.navigation(
                 icon=":material/auto_awesome:", default=True),
         st.Page("app_pages/form_photo.py", title="Form photo", icon=":material/badge:"),
         st.Page("app_pages/batch.py", title="Batch", icon=":material/photo_library:"),
+        st.Page("app_pages/objects.py", title="Objects", icon=":material/category:"),
     ],
     position="top",
 )
