@@ -27,7 +27,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pixelopt.vision import detect, draw, evaluate, inpaint, segment  # noqa: E402
+from pixelopt.vision import detect, draw, evaluate, inpaint, reason, segment  # noqa: E402
 from pixelopt.vision.types import Found  # noqa: E402
 
 SIZE = (640, 480)  # width, height
@@ -312,6 +312,98 @@ class GenerativeFill(unittest.TestCase):
         out = inpaint.composite(image, painted, mask, feather=10)
         np.testing.assert_array_equal(out[~mask], image[~mask])
         self.assertEqual(out.dtype, np.uint8)
+
+
+class _Ollama(http.server.BaseHTTPRequestHandler):
+    """Just enough of Ollama's HTTP API to test the client against."""
+
+    reply = "bare branches against a blue sky"
+    status = 200
+    requests: list = []
+
+    def _send(self, body: dict) -> None:
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(type(self).status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802 - http.server naming
+        self._send({"models": [{"name": "phi4:14b"}, {"name": "llava:7b"}, {"name": "qwen2.5vl:7b"}]})
+
+    def do_POST(self):  # noqa: N802 - http.server naming
+        length = int(self.headers.get("Content-Length", "0"))
+        type(self).requests.append(json.loads(self.rfile.read(length)))
+        self._send({"response": type(self).reply})
+
+    def log_message(self, *args):  # keep test output clean
+        pass
+
+
+class LocalModel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Ollama)
+        cls.url = f"http://127.0.0.1:{cls.server.server_address[1]}"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        _Ollama.reply = "bare branches against a blue sky"
+        _Ollama.status = 200
+        _Ollama.requests = []
+        self.image = Image.fromarray(scene(900, 1200))
+
+    def test_models_are_listed(self):
+        self.assertEqual(reason.models(self.url), ["phi4:14b", "llava:7b", "qwen2.5vl:7b"])
+
+    def test_no_server_means_no_models_not_an_error(self):
+        self.assertEqual(reason.models("http://127.0.0.1:9", timeout=0.3), [])
+
+    def test_the_best_image_reading_model_is_picked(self):
+        self.assertEqual(reason.pick_vision_model(["phi4:14b", "llava:7b", "qwen2.5vl:7b"]), "qwen2.5vl:7b")
+        self.assertEqual(reason.pick_vision_model(["phi4:14b", "bakllava:7b"]), "bakllava:7b")
+        self.assertIsNone(reason.pick_vision_model(["phi4:14b", "codellama:7b"]))
+        self.assertIsNone(reason.pick_vision_model([]))
+
+    def test_a_suggestion_comes_back_tidy(self):
+        _Ollama.reply = '  "Bare branches against a blue sky."\n\nBecause the leaves hide them.'
+        phrase = reason.suggest_fill(self.image, "leaves", "qwen2.5vl:7b", url=self.url)
+        self.assertEqual(phrase, "Bare branches against a blue sky")
+
+    def test_the_request_frees_the_gpu_and_carries_one_small_image(self):
+        reason.suggest_fill(self.image, "person 2", "qwen2.5vl:7b", box=(10, 10, 200, 300), url=self.url)
+        sent = _Ollama.requests[0]
+        self.assertEqual(sent["model"], "qwen2.5vl:7b")
+        self.assertEqual(sent["keep_alive"], 0)
+        self.assertIs(sent["stream"], False)
+        self.assertEqual(len(sent["images"]), 1)
+        picture = Image.open(io.BytesIO(base64.b64decode(sent["images"][0])))
+        self.assertLessEqual(max(picture.size), reason.MAX_SIDE)
+        # The counter is ours, not part of the thing's name; the box is mentioned.
+        self.assertIn("The person outlined in red", sent["prompt"])
+
+    def test_an_unusable_reply_is_none(self):
+        for reply in ("", "   \n  ", "<think>hmm</think>"):
+            with self.subTest(reply=reply):
+                _Ollama.reply = reply
+                self.assertIsNone(reason.suggest_fill(self.image, "leaves", "m", url=self.url))
+
+    def test_a_server_error_or_no_server_is_none(self):
+        _Ollama.status = 500
+        self.assertIsNone(reason.suggest_fill(self.image, "leaves", "m", url=self.url))
+        self.assertIsNone(reason.suggest_fill(self.image, "leaves", "m",
+                                              url="http://127.0.0.1:9", timeout=0.3))
+
+    def test_replies_are_cleaned(self):
+        self.assertEqual(reason.clean_phrase("<think>long reasoning</think>\nA brick wall."), "A brick wall")
+        self.assertEqual(reason.clean_phrase("**grass**"), "grass")
+        self.assertEqual(len(reason.clean_phrase("word " * 100)), 119)
 
 
 class Scoring(unittest.TestCase):
