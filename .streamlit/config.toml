@@ -1,43 +1,53 @@
+# Neutral gray studio. The surround is a mid-dark gray rather than near-black
+# on purpose: the colour around an image changes how bright and contrasty it
+# looks (simultaneous contrast), so a near-black page makes compressed images
+# look punchier than they are and hides the artefacts this app exists to
+# show. Image editors default to a gray surround for the same reason.
+#
 # Native theming rather than injected CSS for colour and type: it applies to
-# every element and survives Streamlit upgrades. The palette takes its cues
-# from Linear -- a near-black ground, hairline borders, muted secondary text,
-# one restrained accent -- without borrowing its brand colour.
+# every element and survives Streamlit upgrades. Contrast was measured:
+# Streamlit draws primary-button text in white, so the teal is dark enough for
+# 4.66:1, and links use a lighter teal at 8.1:1 against the page.
 
 [theme]
 base = "dark"
-primaryColor = "#7b7fff"
-backgroundColor = "#08090a"
-secondaryBackgroundColor = "#131416"
-codeBackgroundColor = "#131416"
-textColor = "#f7f8f8"
-linkColor = "#a3a6ff"
-borderColor = "#232428"
+primaryColor = "#1c8276"
+backgroundColor = "#1f2023"
+secondaryBackgroundColor = "#2a2b2f"
+codeBackgroundColor = "#2a2b2f"
+textColor = "#e8e8ea"
+linkColor = "#5cc8b8"
+borderColor = "#3a3c41"
+dataframeBorderColor = "#3a3c41"
+dataframeHeaderBackgroundColor = "#2a2b2f"
 showWidgetBorder = true
 showSidebarBorder = false
-baseRadius = "10px"
-buttonRadius = "999px"
-font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&display=swap"
+baseRadius = "6px"
+buttonRadius = "6px"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@500;600&display=swap"
 codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
 codeFontSize = "0.85rem"
 baseFontSize = 14
 baseFontWeight = 400
-headingFontSizes = ["40px", "26px", "19px", "15px", "14px", "12px"]
-headingFontWeights = [600, 600, 600, 600, 500, 500]
+headingFontSizes = ["32px", "22px", "17px", "15px", "14px", "12px"]
+headingFontWeights = [600, 600, 500, 500, 500, 500]
 linkUnderline = false
-chartCategoricalColors = ["#7b7fff", "#4cc38a", "#f5a524", "#ff6b8b", "#5ac8fa", "#b58cff", "#8a8f98"]
+chartCategoricalColors = ["#5cc8b8", "#7ee07a", "#f5a524", "#ff6b6b", "#7b9cff", "#c39bff", "#9a9ca3"]
 
-blueColor = "#7b7fff"
-violetColor = "#b58cff"
-greenColor = "#4cc38a"
+# Status colours. "Good" is a yellow-green, well away from the teal accent,
+# so a status dot is never mistaken for the accent.
+greenColor = "#7ee07a"
 yellowColor = "#f5a524"
 orangeColor = "#ff9f43"
 redColor = "#ff6b6b"
+blueColor = "#7b9cff"
+violetColor = "#c39bff"
 
 [theme.sidebar]
-backgroundColor = "#0b0c0d"
-secondaryBackgroundColor = "#131416"
-borderColor = "#1d1e21"
+backgroundColor = "#1b1c1f"
+secondaryBackgroundColor = "#2a2b2f"
+borderColor = "#3a3c41"
 
 [server]
 maxUploadSize = 60

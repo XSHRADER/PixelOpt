@@ -9,7 +9,12 @@ import threading
 import unittest
 from pathlib import Path
 
-import launch
+# launch.py is a script at the repository root, not part of the installed
+# package, so it only imports when the root is on sys.path. CI runs this file
+# directly, without PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import launch  # noqa: E402
 
 
 class _Health(http.server.BaseHTTPRequestHandler):

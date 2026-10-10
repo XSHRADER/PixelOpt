@@ -163,8 +163,9 @@ and matplotlib are all gone, along with a 3 MB committed model file.
   kilobyte readings, and a crop that follows a face or the detail.
 - Batch mode in the app, with failures isolated and a ZIP plus CSV report.
 - A full-resolution damage heatmap and damaged-area measurement.
-- A Streamlit app with top navigation, a batch CLI, and a reproducible
-  benchmark.
+- A Streamlit workbench — controls beside the result, on a mid-gray theme so
+  the surround does not change how compressed images look — plus a batch CLI
+  and a reproducible benchmark.
 
 ## Quality target mode
 
@@ -268,10 +269,12 @@ artefacts away before SSIM can see them: on a faded scan the damaged share read
 - `app.py` — Streamlit entry point: theme, styling, top navigation.
 - `app_pages/` — the Optimize, Form photo and Batch pages.
 - `app_shared.py` — cached Streamlit helpers shared by the pages.
-- `ui_components.py` — hero, count-up metrics, range meter and the
-  slide / flicker / heatmap comparison viewer (Components v2).
+- `ui_components.py` — page header, intro cards, workbench layout, count-up
+  metrics, range meter and the slide / flicker / heatmap comparison viewer
+  (Components v2).
 - `benchmark.py` — reproducible measurements behind the table above.
-- `tests/test_compression.py` — unit tests.
+- `tests/` — unit tests for the engine and the launcher, and a smoke test that
+  every page renders.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) covers how the search works and why, and
 what to know before changing it.

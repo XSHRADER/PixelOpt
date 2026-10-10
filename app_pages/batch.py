@@ -11,41 +11,74 @@ from app_shared import UPLOAD_TYPES, fingerprint, form_job, target_job
 from pixelopt.batch import build_zip, report_csv, run_batch
 from pixelopt.enhance import PRESETS
 from pixelopt.forms import FORM_PRESETS
-from ui_components import hero, metric_strip, thumbnail_url, tone
-
-hero(
-    eyebrow="Batch mode",
-    title="Many images. One download.",
-    subtitle=(
-        "Apply one set of settings to a whole folder. Every file is measured, a "
-        "broken upload never stops the run, and the ZIP holds exactly the bytes "
-        "the report describes."
-    ),
-    chips=("Target size or form photo", "Per-image auto enhancement", "Damage per image",
-           "Failures isolated", "Unique file names", "CSV report", "ZIP export"),
+from ui_components import (
+    file_line,
+    intro_cards,
+    metric_strip,
+    page_header,
+    thumbnail_url,
+    tone,
+    workbench,
 )
 
-files = st.file_uploader("Images", type=UPLOAD_TYPES, accept_multiple_files=True,
-                         key="batch_upload")
 
-with st.container(border=True, key="po_card_batch_settings"):
+def upload_widget():
+    # Identical arguments in both layouts, so the files survive the move.
+    return st.file_uploader("Images", type=UPLOAD_TYPES, accept_multiple_files=True,
+                            key="batch_upload")
+
+
+if not st.session_state.get("batch_upload"):
+    page_header(
+        eyebrow="Batch mode",
+        title="Many images. One download.",
+        subtitle=(
+            "Apply one set of settings to a whole folder. Every file is measured, a "
+            "broken upload never stops the run, and the ZIP holds exactly the bytes "
+            "the report describes."
+        ),
+    )
+    upload_widget()
+    intro_cards([
+        ("iso", ":material/shield:", "Failures stay isolated",
+         "A corrupt or unsupported file is recorded in the report and the rest "
+         "of the batch carries on."),
+        ("names", ":material/label:", "No silent overwrites",
+         "photo.png and photo.jpg would both become photo_pixelopt.jpg, so "
+         "every output gets a distinct name."),
+        ("zip", ":material/folder_zip:", "The bytes that were measured",
+         "The ZIP contains exactly the encodes whose sizes and SSIM appear in "
+         "report.csv — nothing is re-encoded on the way out."),
+    ])
+    st.stop()
+
+files = st.session_state["batch_upload"]
+file_line(f"{len(files)} image{'s' if len(files) != 1 else ''}",
+          f"{sum(f.size for f in files) / 1024 / 1024:.1f} MB in total")
+
+panel, result_col = workbench("batch")
+
+# ---------------------------------------------------------------- settings
+
+with panel:
+    upload_widget()
     mode = st.segmented_control(
         "Mode", ["target", "quality", "form"], default="target", key="batch_mode",
         format_func={"target": "Target size", "quality": "Quality target",
                      "form": "Form photo"}.get,
     ) or "target"
     if mode in ("target", "quality"):
-        c1, c2, c3 = st.columns([2, 1, 1])
         if mode == "target":
-            target_kb, min_ssim = c1.slider("Target size", 10, 2000, 200, 10, format="%d KB",
+            target_kb, min_ssim = st.slider("Target size", 10, 2000, 200, 10, format="%d KB",
                                             key="batch_target"), None
         else:
             target_kb = None
-            min_ssim = c1.slider("Minimum fidelity (SSIM)", 0.900, 0.999, 0.980, 0.001,
+            min_ssim = st.slider("Minimum fidelity (SSIM)", 0.900, 0.999, 0.980, 0.001,
                                  format="%.3f", key="batch_min_ssim",
                                  help="Each image becomes the smallest file that meets this.")
-        fmt_choice = c2.selectbox("Encoder", ["Auto", "JPEG", "WebP", "PNG"], key="batch_fmt")
-        enhancement = c3.selectbox("Enhancement", ["Auto", *sorted(PRESETS)], key="batch_enh",
+        c1, c2 = st.columns(2)
+        fmt_choice = c1.selectbox("Encoder", ["Auto", "JPEG", "WebP", "PNG"], key="batch_fmt")
+        enhancement = c2.selectbox("Enhancement", ["Auto", *sorted(PRESETS)], key="batch_enh",
                                    help="Auto is decided per image from its own noise level.")
         st.caption(":material/verified: Files that already meet the goal are kept as they "
                    "are, with their metadata (including GPS location) removed.")
@@ -62,95 +95,93 @@ with st.container(border=True, key="po_card_batch_settings"):
     measure = st.toggle("Measure damaged area", value=True, key="batch_measure",
                         help="Adds a full-resolution local-SSIM damage measurement "
                              "per image.")
+    payloads = [(f.name, f.getvalue()) for f in files]
+    run = st.button(f"Process {len(payloads)} image{'s' if len(payloads) != 1 else ''}",
+                    type="primary", icon=":material/play_arrow:", key="batch_run",
+                    width="stretch")
 
-if not files:
-    with st.container(horizontal=True, gap="medium"):
-        for key, icon, title, body in (
-            ("iso", ":material/shield:", "Failures stay isolated",
-             "A corrupt or unsupported file is recorded in the report and the rest "
-             "of the batch carries on."),
-            ("names", ":material/label:", "No silent overwrites",
-             "photo.png and photo.jpg would both become photo_pixelopt.jpg, so "
-             "every output gets a distinct name."),
-            ("zip", ":material/folder_zip:", "The bytes that were measured",
-             "The ZIP contains exactly the encodes whose sizes and SSIM appear in "
-             "report.csv — nothing is re-encoded on the way out."),
-        ):
-            with st.container(border=True, key=f"po_card_intro_{key}"):
-                st.markdown(f"#### {icon} {title}")
-                st.caption(body)
-    st.stop()
-
-payloads = [(f.name, f.getvalue()) for f in files]
 signature = (settings_signature, measure, tuple((n, fingerprint(r)) for n, r in payloads))
 
-run = st.button(f"Process {len(payloads)} image{'s' if len(payloads) != 1 else ''}",
-                type="primary", icon=":material/play_arrow:", key="batch_run")
+# ----------------------------------------------------------------- results
 
-if run:
-    if mode in ("target", "quality"):
-        job = target_job(target_kb, None if fmt_choice == "Auto" else fmt_choice.upper(),
-                         enhancement, measure, min_ssim=min_ssim)
-    else:
-        job = form_job(FORM_PRESETS[preset_key], measure)
+with result_col:
+    if run:
+        if mode in ("target", "quality"):
+            job = target_job(target_kb, None if fmt_choice == "Auto" else fmt_choice.upper(),
+                             enhancement, measure, min_ssim=min_ssim)
+        else:
+            job = form_job(FORM_PRESETS[preset_key], measure)
 
-    progress = st.progress(0.0, text="Starting…")
-    ticker = st.empty()
+        progress = st.progress(0.0, text="Starting…")
+        ticker = st.empty()
 
-    def on_progress(done: int, total: int, item) -> None:
-        progress.progress(done / total, text=f"{done} of {total} · {item.name}")
-        ticker.caption(
-            (f":material/check_circle: {item.name} → {item.output_bytes / 1024:.1f} KB "
-             f"in {item.seconds:.1f}s")
-            if item.ok else f":material/error: {item.name} — {item.error}"
+        def on_progress(done: int, total: int, item) -> None:
+            progress.progress(done / total, text=f"{done} of {total} · {item.name}")
+            ticker.caption(
+                (f":material/check_circle: {item.name} → {item.output_bytes / 1024:.1f} KB "
+                 f"in {item.seconds:.1f}s")
+                if item.ok else f":material/error: {item.name} — {item.error}"
+            )
+
+        items = run_batch(payloads, job, on_progress=on_progress)
+        progress.empty()
+        ticker.empty()
+        # Session state, so a rerun does not recompute the whole batch.
+        st.session_state["batch_state"] = {
+            "signature": signature, "items": items,
+            "zip": build_zip(items), "csv": report_csv(items),
+        }
+
+    state = st.session_state.get("batch_state")
+    if state is None:
+        st.info("Choose settings, then press Process.", icon=":material/touch_app:")
+        st.stop()
+    if state["signature"] != signature:
+        st.caption(":material/history: The files or settings have changed since this run — "
+                   "press Process to update.")
+
+    items = state["items"]
+    ok = [item for item in items if item.ok]
+    total_in = sum(item.input_bytes for item in ok)
+    total_out = sum(item.output_bytes for item in ok)
+    fidelities = [item.fidelity for item in ok if item.fidelity == item.fidelity]
+    damages = [item.damaged_share for item in ok if item.damaged_share == item.damaged_share]
+
+    metric_strip(
+        [
+            {"label": "Processed", "text": f"{len(ok)} / {len(items)}",
+             "hint": f"{len(items) - len(ok)} failed" if len(ok) < len(items) else "no failures",
+             "tone": "good" if len(ok) == len(items) else "warn"},
+            {"label": "Total in", "value": total_in / 1024 / 1024, "decimals": 2, "suffix": " MB"},
+            {"label": "Total out", "value": total_out / 1024 / 1024, "decimals": 2, "suffix": " MB"},
+            {"label": "Saved", "value": (1 - total_out / total_in) * 100 if total_in else 0,
+             "decimals": 1, "suffix": "%", "hint": "successful files",
+             "tone": "good" if total_out < total_in else "warn"},
+            {"label": "Median fidelity",
+             "value": statistics.median(fidelities) if fidelities else float("nan"),
+             "decimals": 4,
+             "tone": tone(statistics.median(fidelities), 0.98, 0.93) if fidelities else ""},
+            {"label": "Worst damage",
+             "value": max(damages) * 100 if damages else float("nan"), "decimals": 1,
+             "suffix": "%", "text": "not measured" if not damages else None,
+             "tone": tone(max(damages), 0.02, 0.15, higher_is_better=False) if damages else ""},
+        ],
+        key="batch_metrics",
+    )
+
+    with st.container(horizontal=True, gap="small"):
+        st.download_button(
+            f"Download ZIP · {len(state['zip']) / 1024 / 1024:.2f} MB", data=state["zip"],
+            file_name="pixelopt_batch.zip", mime="application/zip", type="primary",
+            icon=":material/folder_zip:", disabled=not ok, on_click="ignore",
         )
+        st.download_button("Report (CSV)", data=state["csv"], file_name="pixelopt_report.csv",
+                           mime="text/csv", icon=":material/table:", on_click="ignore")
+        if st.button("Clear results", icon=":material/delete_sweep:", key="batch_clear"):
+            st.session_state.pop("batch_state", None)
+            st.rerun()
 
-    items = run_batch(payloads, job, on_progress=on_progress)
-    progress.empty()
-    ticker.empty()
-    # Session state, so a download click (which reruns the page) does not
-    # recompute the whole batch.
-    st.session_state["batch_state"] = {
-        "signature": signature, "items": items,
-        "zip": build_zip(items), "csv": report_csv(items),
-    }
-
-state = st.session_state.get("batch_state")
-if state is None:
-    st.info("Choose settings, then press Process.", icon=":material/touch_app:")
-    st.stop()
-if state["signature"] != signature:
-    st.caption(":material/history: The files or settings have changed since this run — "
-               "press Process to update.")
-
-items = state["items"]
-ok = [item for item in items if item.ok]
-total_in = sum(item.input_bytes for item in ok)
-total_out = sum(item.output_bytes for item in ok)
-fidelities = [item.fidelity for item in ok if item.fidelity == item.fidelity]
-damages = [item.damaged_share for item in ok if item.damaged_share == item.damaged_share]
-
-metric_strip(
-    [
-        {"label": "Processed", "text": f"{len(ok)} / {len(items)}",
-         "hint": f"{len(items) - len(ok)} failed" if len(ok) < len(items) else "no failures",
-         "tone": "good" if len(ok) == len(items) else "warn"},
-        {"label": "Total in", "value": total_in / 1024 / 1024, "decimals": 2, "suffix": " MB"},
-        {"label": "Total out", "value": total_out / 1024 / 1024, "decimals": 2, "suffix": " MB"},
-        {"label": "Saved", "value": (1 - total_out / total_in) * 100 if total_in else 0,
-         "decimals": 1, "suffix": "%", "hint": "across successful files",
-         "tone": "good" if total_out < total_in else "warn"},
-        {"label": "Median fidelity",
-         "value": statistics.median(fidelities) if fidelities else float("nan"),
-         "decimals": 4, "tone": tone(statistics.median(fidelities), 0.98, 0.93) if fidelities else ""},
-        {"label": "Worst damaged area",
-         "value": max(damages) * 100 if damages else float("nan"), "decimals": 1, "suffix": "%",
-         "text": "not measured" if not damages else None,
-         "tone": tone(max(damages), 0.02, 0.15, higher_is_better=False) if damages else ""},
-    ],
-    key="batch_metrics",
-)
-
+# The table is the one wide element, so it runs full width under both panels.
 frame = pd.DataFrame(
     [
         {
@@ -193,15 +224,3 @@ st.dataframe(
         "notes": st.column_config.TextColumn("Notes", width="large"),
     },
 )
-
-with st.container(horizontal=True, gap="small"):
-    st.download_button(
-        f"Download ZIP · {len(state['zip']) / 1024 / 1024:.2f} MB", data=state["zip"],
-        file_name="pixelopt_batch.zip", mime="application/zip", type="primary",
-        icon=":material/folder_zip:", disabled=not ok,
-    )
-    st.download_button("Report (CSV)", data=state["csv"], file_name="pixelopt_report.csv",
-                       mime="text/csv", icon=":material/table:")
-    if st.button("Clear results", icon=":material/delete_sweep:", key="batch_clear"):
-        st.session_state.pop("batch_state", None)
-        st.rerun()

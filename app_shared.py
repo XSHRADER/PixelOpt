@@ -19,6 +19,7 @@ from typing import Callable, Dict, Optional
 import cv2
 import numpy as np
 import streamlit as st
+from PIL import Image
 
 from pixelopt.adaptive_compressor import AdaptiveImageCompressor
 from pixelopt.analysis import damage_map, damage_summary, heatmap_rgba
@@ -34,16 +35,20 @@ UPLOAD_TYPES = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"]
 # The loss map can be 12 MP; the browser only needs a display-sized copy.
 HEATMAP_DISPLAY_SIDE = 1400
 
-CHIPS = (
-    "Resolution from arithmetic", "Log-size interpolation", "SSIM-ranked winner",
-    "JPEG · WebP · lossless PNG", "Measured denoising", "EXIF-aware",
-    "Transparency onto white", "Damage heatmap", "Form photo mode",
-    "Batch ZIP export",
-)
-
-
 def fingerprint(raw: bytes) -> str:
     return hashlib.sha1(raw).hexdigest()
+
+
+def png_bytes(picture: Image.Image) -> bytes:
+    """Lossless PNG of an image, for the reference download.
+
+    Hand it to st.download_button inside a lambda: the button then runs it
+    only when clicked. Encoding a 12 MP PNG on every rerun used to cost
+    seconds whether or not anyone wanted the file.
+    """
+    buffer = io.BytesIO()
+    picture.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
