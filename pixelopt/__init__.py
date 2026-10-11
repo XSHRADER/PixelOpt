@@ -3,4 +3,4 @@
 from .adaptive_compressor import AdaptiveImageCompressor
 
 __all__ = ["AdaptiveImageCompressor"]
-__version__ = "0.2.0"
+__version__ = "0.3.0"
